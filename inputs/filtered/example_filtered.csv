@@ -1,0 +1,2 @@
+gen_data/time,gen_data/delta_f_rad,gen_data/omega_wheel_fl_radps,gen_data/omega_wheel_fr_radps,gen_data/omega_wheel_rl_radps,gen_data/omega_wheel_rr_radps,gen_data/gear,cor_data/time,cor_data/vel_cog_x_mps,cor_data/vel_cog_y_mps,imu_data/time,imu_data/acc_cog_x_mps2,imu_data/acc_cog_y_mps2,imu_data/acc_cog_z_mps2,imu_data/yaw_rate_radps
+0,0,0,0,0,0,0,0,0,0,0,0,0,0,0

@@ -1,0 +1,48 @@
+### Input File Settings ###
+filetype = 'raw' # options: 'filtered', 'raw'
+file_path = ''
+run_names = ['example_raw'] # include all run names here
+signal_names = 'signal_names'
+vehicle_parameter_names = 'vehicle_parameters'
+model = 'LSD-STM' # options: 'STM', 'LSD-STM'
+mode = 'fitting' # options: 'fitting', 'evaluation'
+
+### Preprocessing ###
+filter_gen = "savgol"
+settings_gen = { window_length = 80, order = 3 }
+filter_cor = "savgol"
+settings_cor = { window_length = 200, order = 3 }
+filter_imu = "savgol"
+settings_imu = { window_length = 500, order = 5 }
+low_speed_filter_mps = 20
+gear_change_filter = true
+imu_acc_z_fix = true
+sampling_freq_hz = 100
+vhl_data_filter = true
+save_filtered_data = true
+
+### Sensor Offsets ###
+lambda_v = 0.002724666061852881
+lambda_ax = -0.01170376903690157
+lambda_ay = -0.016783257225372876
+ax_median = -0.1148113531011835
+ay_median = -0.1646360240768384
+az_off = 9.868108178267395
+yaw_rate_off = -0.0001215004043844
+
+### Fitting ###
+nelder_options = { maxiter = 10000000, sample_points = 1500 }
+svi_options = { iter_svi_MFS = 50000, step_MFS = 0.000825, sample_points = 1500 }
+params_min = {B=5.0, C=1.0, D=0.0, E=-1.0, S_H=0.0, S_V=0.0}
+params_max = {B=40.0, C=3.0, D=2.0, E=1.0, S_H=0.0, S_V=0.0}
+params_init = {B=10.0, C=1.65, D=1.5, E=-1.0, S_H=0.0, S_V=0.0}
+fit_flags_front_axle_x = {B=true, C=true, D=true, E=true}
+fit_flags_front_axle_y = {B=true, C=true, D=true, E=true}
+fit_flags_rear_axle_x = {B=true, C=true, D=true, E=true}
+fit_flags_rear_axle_y = {B=true, C=true, D=true, E=true}
+
+### Results ###
+output_folder_path = ""
+output_folder = "default"
+enable_plotting = true
+enable_logging = true

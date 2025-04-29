@@ -1,0 +1,2 @@
+timestamp_s,/vehicle/sensor/imu3/header/stamp/sec,/vehicle/sensor/imu3/header/stamp/nanosec,/vehicle/sensor/imu3/header/frame_id,/vehicle/sensor/imu3/orientation/x,/vehicle/sensor/imu3/orientation/y,/vehicle/sensor/imu3/orientation/z,/vehicle/sensor/imu3/orientation/w,/vehicle/sensor/imu3/angular_velocity/x,/vehicle/sensor/imu3/angular_velocity/y,/vehicle/sensor/imu3/angular_velocity/z,/vehicle/sensor/imu3/linear_acceleration/x,/vehicle/sensor/imu3/linear_acceleration/y,/vehicle/sensor/imu3/linear_acceleration/z
+0,0,0,0,0,0,0,0,0,0,0,0,0,0

@@ -1,0 +1,27 @@
+### Vehicle Measurements ###
+l_front_m = 1.8
+l_rear_m = 1.4
+cog_z_m = 0.3
+tw_rear_m = 1.5
+### Vehicle Intertia ###
+mass_kg = 1000
+izz_kgm2 = 1000
+### Tire Properties ###
+r_tire_unloaded_front_m = 0.3
+r_tire_unloaded_rear_m = 0.3
+tire_load_stiffness_front_npm = 2.0e5
+tire_load_stiffness_rear_npm = 2.0e5
+tire_speed_expansion_front_mpradps2 =2.0e-7
+tire_speed_expansion_rear_mpradps2 =2.0e-7    
+tire_roll_resistance = 0.01
+### Aero ###
+cw = 1.0                    
+cl_front =  -1.0                
+cl_rear = -1.0               
+roh_air_kgpm3 = 1.204
+a_vehicle_m2 = 1.00
+### Limited Slip Differential ###
+ratio_lock_drive = 0.2
+ratio_lock_coast = 0.5
+torque_preload_nm = 100
+slip_sensitivity_coeff = 0.5
