@@ -108,7 +108,7 @@ GUI:
 
 ## References
 
-If you use the 3DVehicleDynamicsStateEstimation in your work please consider citing our paper:
+If you use the provided code in your work please consider citing our paper:
 - [Bayesian Optimization-based Tire Parameter and Uncertainty Estimation for Real-World Data](https://arxiv.org/abs/2504.20863)
 
 ```bibtex
