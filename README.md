@@ -109,14 +109,17 @@ GUI:
 ## References
 
 If you use the 3DVehicleDynamicsStateEstimation in your work please consider citing our paper:
-<!-- - [Bayesian Optimization based Tire Parameter and Uncertainty Estimation for Real-World Data](Link) -->
+- [Bayesian Optimization-based Tire Parameter and Uncertainty Estimation for Real-World Data](https://arxiv.org/abs/2504.20863)
 
 ```bibtex
-@article{goblirsch2025,
-  title={Bayesian Optimization based Tire Parameter and Uncertainty Estimation for Real-World Data},
-  author={Goblirsch, Sven and Ruhland, Benedikt and Betz, Johannes and Lienkamp, Markus},
-  journal={},
-  year={2025}
+@misc{goblirsch2025,
+      title={Bayesian Optimization-based Tire Parameter and Uncertainty Estimation for Real-World Data}, 
+      author={Sven Goblirsch and Benedikt Ruhland and Johannes Betz and Markus Lienkamp},
+      year={2025},
+      eprint={2504.20863},
+      archivePrefix={arXiv},
+      primaryClass={cs.RO},
+      url={https://arxiv.org/abs/2504.20863}, 
 }
 ```
 
