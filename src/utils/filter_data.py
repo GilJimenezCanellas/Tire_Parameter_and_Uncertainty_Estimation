@@ -59,14 +59,14 @@ def vel_offset_correction(lambda_vel: float, data: CorData):
     return data
 
 
-def imu_offset_correction(lambda_ax: float, lambda_ay: float, yaw_rate_off: float, az_off: float, data: ImuData):
+def imu_offset_correction(median_ax: float, median_ay: float, lambda_ax: float, lambda_ay: float, yaw_rate_off: float, az_off: float, data: ImuData):
     ''' Corrects the IMU data according to the sensor offset '''
     data.acc_cog_x_mps2 = (data.acc_cog_x_mps2 -
-                           jnp.median(data.acc_cog_x_mps2)) / jnp.cos(lambda_ax)
+                           median_ax) / jnp.cos(lambda_ax)
     data.acc_cog_y_mps2 = (data.acc_cog_y_mps2 -
-                           jnp.median(data.acc_cog_y_mps2)) / jnp.cos(lambda_ay)
+                           median_ay) / jnp.cos(lambda_ay)
     data.yaw_rate_radps = data.yaw_rate_radps - yaw_rate_off
-    data.acc_cog_z_mps2 = data.acc_cog_z_mps2 + (9.81 - az_off)
+    data.acc_cog_z_mps2 = data.acc_cog_z_mps2 - az_off
     return data
 
 def preprocess_data(conf: Config, all_data: FilteredData = FilteredData()):
@@ -74,7 +74,8 @@ def preprocess_data(conf: Config, all_data: FilteredData = FilteredData()):
     for run_name in tqdm(conf.run_names, desc="Loading raw data"):
         data_cor, data_gen, data_imu = load_raw_data(conf, run_name)
         data_cor = vel_offset_correction(conf.lambda_v, data_cor)
-        data_imu = imu_offset_correction(conf.lambda_ax, conf.lambda_ay,
+        data_imu = imu_offset_correction(conf.ax_median, conf.ay_median,
+                                         conf.lambda_ax, conf.lambda_ay,
                                          conf.yaw_rate_off, conf.az_off, data_imu)
         data_gen = fitler_data(conf.filter_gen, conf.settings_gen, data_gen)
         data_cor = fitler_data(conf.filter_cor, conf.settings_cor, data_cor)
