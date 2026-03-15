@@ -27,8 +27,8 @@ def calc_slip(axle_speed_radps: jnp.array, radius_dynamic_m: jnp.array, vel_tire
               vel_tire_y_mps: jnp.array):
     ''' Calculate tire slip '''
     vel_tire_x_mps = jnp.clip(vel_tire_x_mps, a_min=2)
-    sigma_x = (axle_speed_radps * radius_dynamic_m - vel_tire_x_mps) / vel_tire_x_mps
-    sigma_y = -jnp.arctan(vel_tire_y_mps / vel_tire_x_mps)
+    sigma_x = (axle_speed_radps * radius_dynamic_m - vel_tire_x_mps) / jnp.maximum(vel_tire_x_mps, axle_speed_radps * radius_dynamic_m)
+    sigma_y = jnp.arctan(vel_tire_y_mps / vel_tire_x_mps)
     return sigma_x, sigma_y
 
 
@@ -51,27 +51,27 @@ def calc_vhl_states(sensordata: FilteredData, vhlparams: VhlParams, stm_states: 
                                  (jnp.clip(sensordata.cor_data.vel_cog_x_mps, a_min=2)))
     stm_states.dd_psi = jnp.gradient(sensordata.imu_data.yaw_rate_radps)
     load_front_n, load_rear_n = calc_axle_loads(sensordata, vhlparams)
-    stm_states.radius_dyn_front_m = \
-        calc_tire_radius(load_front_n, vhlparams.r_tire_unloaded_front_m,
-                         vhlparams.tire_speed_expansion_front_mpradps2,
-                         (sensordata.gen_data.omega_wheel_fl_radps +
-                          sensordata.gen_data.omega_wheel_fr_radps) / 2,
-                         vhlparams.tire_load_stiffness_front_npm)
-    stm_states.radius_dyn_rear_m = \
-        calc_tire_radius(load_rear_n, vhlparams.r_tire_unloaded_rear_m,
-                         vhlparams.tire_speed_expansion_rear_mpradps2,
-                         (sensordata.gen_data.omega_wheel_rl_radps +
-                          sensordata.gen_data.omega_wheel_rr_radps) / 2,
-                         vhlparams.tire_load_stiffness_rear_npm)
+    stm_states.radius_dyn_front_m = 0.203 #\
+        # calc_tire_radius(load_front_n, vhlparams.r_tire_unloaded_front_m,
+        #                  vhlparams.tire_speed_expansion_front_mpradps2,
+        #                  (sensordata.gen_data.omega_wheel_fl_radps +
+        #                   sensordata.gen_data.omega_wheel_fr_radps) / 2,
+        #                  vhlparams.tire_load_stiffness_front_npm)
+    stm_states.radius_dyn_rear_m = 0.203 #\
+        # calc_tire_radius(load_rear_n, vhlparams.r_tire_unloaded_rear_m,
+        #                  vhlparams.tire_speed_expansion_rear_mpradps2,
+        #                  (sensordata.gen_data.omega_wheel_rl_radps +
+        #                   sensordata.gen_data.omega_wheel_rr_radps) / 2,
+        #                  vhlparams.tire_load_stiffness_rear_npm)
     # Transform lateral velocity to axle frame
     vel_y_front_mps = sensordata.cor_data.vel_cog_y_mps + \
         sensordata.imu_data.yaw_rate_radps * vhlparams.l_front_m
     vel_y_rear_mps = sensordata.cor_data.vel_cog_y_mps - \
         sensordata.imu_data.yaw_rate_radps * vhlparams.l_rear_m
     # Transform velocity to tire frame
-    vel_x_tireframe_front_mps = jnp.cos(sensordata.gen_data.delta_f_rad) * sensordata.cor_data.vel_cog_x_mps + \
+    vel_x_tireframe_front_mps = jnp.cos(sensordata.gen_data.delta_f_rad) * sensordata.cor_data.vel_cog_x_mps - \
         jnp.sin(sensordata.gen_data.delta_f_rad) * vel_y_front_mps
-    vel_y_tireframe_front_mps = -jnp.sin(sensordata.gen_data.delta_f_rad) * sensordata.cor_data.vel_cog_x_mps + \
+    vel_y_tireframe_front_mps = jnp.sin(sensordata.gen_data.delta_f_rad) * sensordata.cor_data.vel_cog_x_mps + \
         jnp.cos(sensordata.gen_data.delta_f_rad) * vel_y_front_mps
     stm_states.front_axle.sigma_x, stm_states.front_axle.sigma_y = \
         calc_slip((sensordata.gen_data.omega_wheel_fl_radps + sensordata.gen_data.omega_wheel_fr_radps) / 2,
@@ -100,11 +100,7 @@ def calc_vhl_forces(model: str, sensordata: FilteredData, vhlstates: STMStates, 
     # similar to Farroni T.R.I.C.K.‐Tire/Road Interaction Characterization & Knowledge
     force_x_front_n = jnp.zeros(len(sensordata.gen_data.time))
     force_y_front_n = jnp.zeros(len(sensordata.gen_data.time))
-    # Create masks for acceleration and deceleration
-    dec_mask = stm_forces.cog.force_x_n < 0.0
-    # Calculate values for deceleration
-    force_x_front_n = force_x_front_n.at[dec_mask].set(stm_forces.cog.force_x_n[dec_mask] *
-                                                       load_front_n[dec_mask] / (load_front_n[dec_mask] + load_rear_n[dec_mask]))
+    force_x_front_n = stm_forces.cog.force_x_n * load_front_n / (load_front_n + load_rear_n)
     stm_forces.rear_axle.force_x_n = stm_forces.cog.force_x_n - force_x_front_n
 
     # Limited Slip Differential

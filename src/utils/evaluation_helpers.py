@@ -50,7 +50,11 @@ def plot_tire_curves(vehicle_states: STMStates, vehicle_forces: STMForces,
     fig, ax = plt.subplots(2, 2, figsize=(column_width, column_width * 0.618))
     ax = ax.flatten()
     plot_pos = 0
-    slip_plot = jnp.linspace(-0.2, 0.2, 100)
+    all_sigma_y = jnp.concatenate([
+        vehicle_states.front_axle.sigma_y,
+        vehicle_states.rear_axle.sigma_y,
+    ])
+    slip_plot = jnp.linspace(jnp.min(all_sigma_y)-0.1, jnp.max(all_sigma_y)+0.1, 200)
     load = 3000.0
     # Calculate tire forces for SVI parameters
     tire_forces_svi = STMForces()
