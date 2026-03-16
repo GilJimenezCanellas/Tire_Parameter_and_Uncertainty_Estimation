@@ -126,15 +126,27 @@ def preprocess_data(conf: Config, all_data: FilteredData = FilteredData()):
 def filter_vhl_data(vhl_states: STMStates, vhl_forces: STMForces, threshold: float = 2):
     ''' Filter states and forces for outliers with a maximum standard deviation threshold (2 times default)'''
     mask = jnp.ones_like(vhl_states.beta, dtype=bool)
-    for axle in ['front_axle', 'rear_axle']:
-        for key in ['x', 'y']:
+    fit_targets = [
+        ('wheel_fl', 'x'),
+        ('wheel_fr', 'x'),
+        ('wheel_rl', 'x'),
+        ('wheel_rr', 'x'),
+        ('front_axle', 'y'),
+        ('rear_axle', 'y'),
+    ]
+    for axle, key in fit_targets:
             sigma_values = getattr(getattr(vhl_states, axle), 'sigma_' + key)
             force_values = getattr(getattr(vhl_forces, axle), 'force_' + key + '_n')
             # Cluster sigma values into 20 clusters
-            kmeans = KMeans(n_clusters=20, random_state=0).fit(sigma_values.reshape(-1, 1))
+            n_clusters = min(20, len(sigma_values))
+            if n_clusters < 2:
+                continue
+            kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(sigma_values.reshape(-1, 1))
             clusters = kmeans.labels_
             for cluster in range(len(kmeans.cluster_centers_)):
                 cluster_mask = (clusters == cluster)
+                if jnp.sum(cluster_mask) < 2:
+                    continue
                 cluster_force_values = force_values[cluster_mask]
                 tire_data = np.column_stack((sigma_values[cluster_mask], cluster_force_values))
                 z_scores = jnp.abs(zscore(tire_data, axis=0))
@@ -151,4 +163,40 @@ def filter_vhl_data(vhl_states: STMStates, vhl_forces: STMForces, threshold: flo
                 setattr(getattr(vhl_forces, field.name), key, jnp.array(
                     getattr(getattr(vhl_forces, field.name), key))[mask])
     print('Filtering of outliers finished')
+    return vhl_states, vhl_forces
+
+def reject_transient_data(sensordata: FilteredData, vhl_states: STMStates, vhl_forces: STMForces, 
+                          max_yaw_accel_radps2: float = 0.5, 
+                          max_steer_vel_radps: float = 0.15):
+    ''' Filter out highly transient data points based on angular acceleration and steering velocity. '''
+    
+    # 1. Calculate steering velocity (delta_dot)
+    delta_dot = jnp.gradient(sensordata.gen_data.delta_f_rad, sensordata.gen_data.time)
+    
+    # 2. Create the steady-state boolean mask
+    mask = (jnp.abs(vhl_states.dd_psi) < max_yaw_accel_radps2) & \
+           (jnp.abs(delta_dot) < max_steer_vel_radps)
+    
+    # 3. Apply mask to vhl_states (both top-level and nested)
+    for field in fields(vhl_states):
+        if is_dataclass(field.type):
+            for key in field.type.__dataclass_fields__:
+                setattr(getattr(vhl_states, field.name), key, 
+                        jnp.array(getattr(getattr(vhl_states, field.name), key))[mask])
+        else:
+            # Handle top-level arrays like beta and dd_psi
+            val = getattr(vhl_states, field.name)
+            if isinstance(val, (jnp.ndarray, np.ndarray)) and len(val) == len(mask):
+                setattr(vhl_states, field.name, jnp.array(val)[mask])
+                
+    # 4. Apply mask to vhl_forces (nested)
+    for field in fields(vhl_forces):
+        if is_dataclass(field.type):
+            for key in field.type.__dataclass_fields__:
+                setattr(getattr(vhl_forces, field.name), key, 
+                        jnp.array(getattr(getattr(vhl_forces, field.name), key))[mask])
+
+    dropped_pts = len(mask) - jnp.sum(mask)
+    print(f"Transient rejection: Dropped {dropped_pts} points. {jnp.sum(mask)} steady-state points remaining.")
+    
     return vhl_states, vhl_forces

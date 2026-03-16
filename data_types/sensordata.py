@@ -20,6 +20,14 @@ class GenData:
     omega_wheel_fr_radps: jnp.array = field(default_factory=lambda: jnp.array([]))
     omega_wheel_rl_radps: jnp.array = field(default_factory=lambda: jnp.array([]))
     omega_wheel_rr_radps: jnp.array = field(default_factory=lambda: jnp.array([]))
+    omega_m_fl_radps: jnp.array = field(default_factory=lambda: jnp.array([]))
+    omega_m_fr_radps: jnp.array = field(default_factory=lambda: jnp.array([]))
+    omega_m_rl_radps: jnp.array = field(default_factory=lambda: jnp.array([]))
+    omega_m_rr_radps: jnp.array = field(default_factory=lambda: jnp.array([]))
+    t_m_fl_nm: jnp.array = field(default_factory=lambda: jnp.array([]))
+    t_m_fr_nm: jnp.array = field(default_factory=lambda: jnp.array([]))
+    t_m_rl_nm: jnp.array = field(default_factory=lambda: jnp.array([]))
+    t_m_rr_nm: jnp.array = field(default_factory=lambda: jnp.array([]))
     gear: jnp.array = field(default_factory=lambda: jnp.array([]))
 
 

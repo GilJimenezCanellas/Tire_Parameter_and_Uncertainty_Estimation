@@ -25,11 +25,15 @@ class MFCombinedParams:
 @dataclass
 class STMTireParams:
     ''' Dataclass for storing STM Tire parameters '''
-    front_axle_x: MFSimpleParams = field(
+    wheel_fl_x: MFSimpleParams = field(
+        default_factory=lambda: MFSimpleParams(0, 0, 0, 0, 0, 0))
+    wheel_fr_x: MFSimpleParams = field(
+        default_factory=lambda: MFSimpleParams(0, 0, 0, 0, 0, 0))
+    wheel_rl_x: MFSimpleParams = field(
+        default_factory=lambda: MFSimpleParams(0, 0, 0, 0, 0, 0))
+    wheel_rr_x: MFSimpleParams = field(
         default_factory=lambda: MFSimpleParams(0, 0, 0, 0, 0, 0))
     front_axle_y: MFSimpleParams = field(
-        default_factory=lambda: MFSimpleParams(0, 0, 0, 0, 0, 0))
-    rear_axle_x: MFSimpleParams = field(
         default_factory=lambda: MFSimpleParams(0, 0, 0, 0, 0, 0))
     rear_axle_y: MFSimpleParams = field(
         default_factory=lambda: MFSimpleParams(0, 0, 0, 0, 0, 0))
@@ -41,6 +45,7 @@ class VhlParams:
     ### Vehicle Measurements ###
     l_front_m: float
     l_rear_m: float
+    tw_front_m: float
     cog_z_m: float
     tw_rear_m: float
     ### Vehicle Intertia ###
@@ -49,6 +54,8 @@ class VhlParams:
     ### Tire Properties ###
     r_tire_unloaded_front_m: float
     r_tire_unloaded_rear_m: float
+    gear_ratio: float
+    wheel_inertia_kgm2: float
     tire_load_stiffness_front_npm: float
     tire_load_stiffness_rear_npm: float
     tire_speed_expansion_front_mpradps2: float

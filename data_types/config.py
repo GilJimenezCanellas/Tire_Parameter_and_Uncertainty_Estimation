@@ -41,9 +41,11 @@ class Config():
     params_min: dict
     params_max: dict
     params_init: dict
-    fit_flags_front_axle_x: dict
+    fit_flags_wheel_fl_x: dict
+    fit_flags_wheel_fr_x: dict
+    fit_flags_wheel_rl_x: dict
+    fit_flags_wheel_rr_x: dict
     fit_flags_front_axle_y: dict
-    fit_flags_rear_axle_x: dict
     fit_flags_rear_axle_y: dict
     ### Evaluation Settings ###
     output_folder_path: str

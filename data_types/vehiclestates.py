@@ -25,6 +25,10 @@ class STMStates():
     dd_psi: jnp.array = field(default_factory=lambda: jnp.array([]))
     front_axle: TireStates = field(default_factory=TireStates)
     rear_axle: TireStates = field(default_factory=TireStates)
+    wheel_fl: TireStates = field(default_factory=TireStates)
+    wheel_fr: TireStates = field(default_factory=TireStates)
+    wheel_rl: TireStates = field(default_factory=TireStates)
+    wheel_rr: TireStates = field(default_factory=TireStates)
     radius_dyn_front_m: jnp.array = field(
         default_factory=lambda: jnp.array([]))
     radius_dyn_rear_m: jnp.array = field(default_factory=lambda: jnp.array([]))
@@ -36,3 +40,7 @@ class STMForces:
     cog: Forces = field(default_factory=Forces)
     front_axle: Forces = field(default_factory=Forces)
     rear_axle: Forces = field(default_factory=Forces)
+    wheel_fl: Forces = field(default_factory=Forces)
+    wheel_fr: Forces = field(default_factory=Forces)
+    wheel_rl: Forces = field(default_factory=Forces)
+    wheel_rr: Forces = field(default_factory=Forces)
