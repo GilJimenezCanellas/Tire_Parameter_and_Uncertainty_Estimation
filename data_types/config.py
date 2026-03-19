@@ -52,3 +52,4 @@ class Config():
     output_folder: str
     enable_plotting: bool
     enable_logging: bool
+    clean_plots: bool

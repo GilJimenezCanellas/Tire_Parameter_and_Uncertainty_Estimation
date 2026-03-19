@@ -122,8 +122,8 @@ def preprocess_data(conf: Config, all_data: FilteredData = FilteredData()):
     print('Preprocessing finished')
     return all_data
 
-
-def filter_vhl_data(vhl_states: STMStates, vhl_forces: STMForces, threshold: float = 2):
+def filter_vhl_data(vhl_states: STMStates, vhl_forces: STMForces, threshold: float = 2,
+                    return_mask: bool = False):
     ''' Filter states and forces for outliers with a maximum standard deviation threshold (2 times default)'''
     mask = jnp.ones_like(vhl_states.beta, dtype=bool)
     fit_targets = [
@@ -135,39 +135,46 @@ def filter_vhl_data(vhl_states: STMStates, vhl_forces: STMForces, threshold: flo
         ('rear_axle', 'y'),
     ]
     for axle, key in fit_targets:
-            sigma_values = getattr(getattr(vhl_states, axle), 'sigma_' + key)
-            force_values = getattr(getattr(vhl_forces, axle), 'force_' + key + '_n')
-            # Cluster sigma values into 20 clusters
-            n_clusters = min(20, len(sigma_values))
-            if n_clusters < 2:
+        sigma_values = getattr(getattr(vhl_states, axle), 'sigma_' + key)
+        force_values = getattr(getattr(vhl_forces, axle), 'force_' + key + '_n')
+        # Cluster sigma values into 20 clusters
+        n_clusters = min(20, len(sigma_values))
+        if n_clusters < 2:
+            continue
+        kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(sigma_values.reshape(-1, 1))
+        clusters = kmeans.labels_
+        for cluster in range(len(kmeans.cluster_centers_)):
+            cluster_mask = (clusters == cluster)
+            if jnp.sum(cluster_mask) < 2:
                 continue
-            kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(sigma_values.reshape(-1, 1))
-            clusters = kmeans.labels_
-            for cluster in range(len(kmeans.cluster_centers_)):
-                cluster_mask = (clusters == cluster)
-                if jnp.sum(cluster_mask) < 2:
-                    continue
-                cluster_force_values = force_values[cluster_mask]
-                tire_data = np.column_stack((sigma_values[cluster_mask], cluster_force_values))
-                z_scores = jnp.abs(zscore(tire_data, axis=0))
-                mask = mask.at[cluster_mask].set(
-                    mask[cluster_mask] & (z_scores < threshold).all(axis=1))
+            cluster_force_values = force_values[cluster_mask]
+            tire_data = np.column_stack((sigma_values[cluster_mask], cluster_force_values))
+            z_scores = jnp.abs(zscore(tire_data, axis=0))
+            mask = mask.at[cluster_mask].set(
+                mask[cluster_mask] & (z_scores < threshold).all(axis=1))
     for field in fields(vhl_states):
         if is_dataclass(field.type):
             for key in field.type.__dataclass_fields__:
                 setattr(getattr(vhl_states, field.name), key, jnp.array(
                     getattr(getattr(vhl_states, field.name), key))[mask])
+        else:
+            val = getattr(vhl_states, field.name)
+            if isinstance(val, (jnp.ndarray, np.ndarray)) and len(val) == len(mask):
+                setattr(vhl_states, field.name, jnp.array(val)[mask])
     for field in fields(vhl_forces):
         if is_dataclass(field.type):
             for key in field.type.__dataclass_fields__:
                 setattr(getattr(vhl_forces, field.name), key, jnp.array(
                     getattr(getattr(vhl_forces, field.name), key))[mask])
     print('Filtering of outliers finished')
+    if return_mask:
+        return vhl_states, vhl_forces, np.asarray(mask, dtype=bool)
     return vhl_states, vhl_forces
 
 def reject_transient_data(sensordata: FilteredData, vhl_states: STMStates, vhl_forces: STMForces, 
                           max_yaw_accel_radps2: float = 0.5, 
-                          max_steer_vel_radps: float = 0.15):
+                          max_steer_vel_radps: float = 0.15,
+                          return_mask: bool = False):
     ''' Filter out highly transient data points based on angular acceleration and steering velocity. '''
     
     # 1. Calculate steering velocity (delta_dot)
@@ -198,5 +205,120 @@ def reject_transient_data(sensordata: FilteredData, vhl_states: STMStates, vhl_f
 
     dropped_pts = len(mask) - jnp.sum(mask)
     print(f"Transient rejection: Dropped {dropped_pts} points. {jnp.sum(mask)} steady-state points remaining.")
-    
+
+    if return_mask:
+        return vhl_states, vhl_forces, np.asarray(mask, dtype=bool)
     return vhl_states, vhl_forces
+
+
+def _robust_abs_scale(values: np.ndarray, percentile: float = 75.0, floor: float = 1.0e-6) -> float:
+    '''Return a robust normalization factor for absolute-valued signals.'''
+    values = np.asarray(values, dtype=float)
+    if values.size == 0:
+        return floor
+    scale = float(np.percentile(np.abs(values), percentile))
+    return max(scale, floor)
+
+
+def _build_balancing_edges(sigma_values: np.ndarray, num_regions: int, tail_quantile: float) -> np.ndarray:
+    '''Construct symmetric slip regions with open-ended tails for rare extreme excitations.'''
+    sigma_values = np.asarray(sigma_values, dtype=float)
+    if sigma_values.size == 0:
+        return np.array([-np.inf, np.inf], dtype=float)
+    max_abs = float(np.max(np.abs(sigma_values)))
+    if not np.isfinite(max_abs) or max_abs < 1.0e-6:
+        return np.array([-np.inf, 0.0, np.inf], dtype=float)
+    num_regions = max(int(num_regions), 3)
+    tail_limit = float(np.quantile(np.abs(sigma_values), tail_quantile))
+    tail_limit = min(max(tail_limit, 1.0e-6), max_abs)
+    inner_region_count = max(num_regions - 2, 1)
+    inner_edges = np.linspace(-tail_limit, tail_limit, inner_region_count + 1)
+    return np.concatenate(([-np.inf], inner_edges, [np.inf]))
+
+
+def select_balanced_fit_samples(sigma_values, force_values, load_values, yaw_accel_values, steer_vel_values,
+                                target_count: int, num_regions: int | None = None, tail_quantile: float = 0.9,
+                                target_points_per_region: int = 125, max_regions: int = 12,
+                                yaw_weight: float = 1.0, steer_weight: float = 1.0):
+    '''Select a balanced per-target subset by keeping the least-transient points in each slip region.'''
+    sigma_values = np.asarray(sigma_values, dtype=float).ravel()
+    force_values = np.asarray(force_values, dtype=float).ravel()
+    load_values = np.asarray(load_values, dtype=float).ravel()
+    yaw_accel_values = np.asarray(yaw_accel_values, dtype=float).ravel()
+    steer_vel_values = np.asarray(steer_vel_values, dtype=float).ravel()
+
+    valid_mask = np.isfinite(sigma_values) & np.isfinite(force_values) & np.isfinite(load_values)
+    valid_mask &= np.isfinite(yaw_accel_values) & np.isfinite(steer_vel_values)
+    sigma_values = sigma_values[valid_mask]
+    force_values = force_values[valid_mask]
+    load_values = load_values[valid_mask]
+    yaw_accel_values = yaw_accel_values[valid_mask]
+    steer_vel_values = steer_vel_values[valid_mask]
+
+    if sigma_values.size == 0:
+        return {
+            'sigma': jnp.array([]),
+            'force_n': jnp.array([]),
+            'load_n': jnp.array([]),
+            'region_edges': np.array([-np.inf, np.inf], dtype=float),
+            'region_counts_before': [],
+            'region_counts_after': [],
+            'transient_score': jnp.array([]),
+        }
+
+    target_count = max(1, min(int(target_count), sigma_values.size))
+    if num_regions is None:
+        num_regions = int(np.clip(round(target_count / max(target_points_per_region, 1)), 6, max_regions))
+    num_regions = min(max(int(num_regions), 3), sigma_values.size)
+    region_edges = _build_balancing_edges(sigma_values, num_regions, tail_quantile)
+
+    yaw_scale = _robust_abs_scale(yaw_accel_values)
+    steer_scale = _robust_abs_scale(steer_vel_values)
+    transient_score = yaw_weight * np.abs(yaw_accel_values) / yaw_scale
+    transient_score += steer_weight * np.abs(steer_vel_values) / steer_scale
+
+    region_candidate_indices = []
+    region_counts_before = []
+    for region_idx in range(len(region_edges) - 1):
+        lower_edge = region_edges[region_idx]
+        upper_edge = region_edges[region_idx + 1]
+        if region_idx == len(region_edges) - 2:
+            region_mask = (sigma_values >= lower_edge) & (sigma_values <= upper_edge)
+        else:
+            region_mask = (sigma_values >= lower_edge) & (sigma_values < upper_edge)
+        candidate_indices = np.where(region_mask)[0]
+        candidate_indices = candidate_indices[np.argsort(transient_score[candidate_indices], kind='stable')]
+        region_candidate_indices.append(candidate_indices)
+        region_counts_before.append(int(candidate_indices.size))
+
+    quotas = np.array([min(target_count // len(region_candidate_indices), count)
+                       for count in region_counts_before], dtype=int)
+    remaining_budget = target_count - int(np.sum(quotas))
+    while remaining_budget > 0:
+        eligible = [idx for idx, candidate_indices in enumerate(region_candidate_indices)
+                    if quotas[idx] < len(candidate_indices)]
+        if not eligible:
+            break
+        chosen_region = min(eligible, key=lambda idx: (quotas[idx], -region_counts_before[idx], idx))
+        quotas[chosen_region] += 1
+        remaining_budget -= 1
+
+    selected_indices = [
+        candidate_indices[:quotas[idx]]
+        for idx, candidate_indices in enumerate(region_candidate_indices)
+        if quotas[idx] > 0
+    ]
+    if selected_indices:
+        selected_indices = np.sort(np.concatenate(selected_indices))
+    else:
+        selected_indices = np.array([], dtype=int)
+
+    return {
+        'sigma': jnp.array(sigma_values[selected_indices]),
+        'force_n': jnp.array(force_values[selected_indices]),
+        'load_n': jnp.array(load_values[selected_indices]),
+        'region_edges': region_edges,
+        'region_counts_before': region_counts_before,
+        'region_counts_after': quotas.tolist(),
+        'transient_score': jnp.array(transient_score[selected_indices]),
+    }

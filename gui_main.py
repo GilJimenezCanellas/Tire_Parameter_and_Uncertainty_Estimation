@@ -9,7 +9,7 @@ from data_types.vehicleparameters import MFSimpleParams, STMTireParams
 from data_types.vehiclestates import STMStates, STMForces
 from data_types.sensordata import FilteredData
 
-from src.utils.evaluation_helpers import plot_bell_curves, plot_tire_curves
+from src.utils.evaluation_helpers import plot_bell_curves, plot_tire_curves, plot_excitation_histograms
 from src.utils.filter_data import filter_vhl_data
 from src.utils.datamanager import load_config
 from src.utils.datamanager import save_dataclass_to_csv, load_params, get_repository_path
@@ -404,6 +404,10 @@ def main():
         plot_bell_curves(tire_params_set_svi, std_params_set_svi, params_min, params_max)
         plt.show()
 
+    def show_plot_excitation_histograms(vhl_states_local):
+        plot_excitation_histograms(vhl_states_local)
+        plt.show()
+
     plot_tire_curves_button = tk.Button(frames["frame_postprocess"], text='Plot Tire Curves',
                                         command=lambda: show_plot_tire_curves(vhl_states, vhl_forces,
                                                                               tire_params_set_svi, tire_params_set_nelder))
@@ -414,6 +418,9 @@ def main():
                                                                                   **config.params_min),
                                                                               MFSimpleParams(**config.params_max)))
     plot_bell_curves_button.grid(row=1, column=2, sticky='w')
+    plot_excitation_histograms_button = tk.Button(frames["frame_postprocess"], text='Plot Excitation Histograms',
+                                                  command=lambda: show_plot_excitation_histograms(vhl_states))
+    plot_excitation_histograms_button.grid(row=1, column=3, sticky='w')
 
     headline_save_results = tk.Label(
         frames["frame_postprocess"], text="Save Results", font=bald_font)

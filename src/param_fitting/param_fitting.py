@@ -118,20 +118,24 @@ def tire_param_fitting(algorithm: str, tire_model: str, sigma: jnp.array, force_
     ''' Function to fit the tire parameters using a specified algorithm. '''
     if not any(fit_flags.values()):
         raise ValueError("No parameters to fit - check fit_flags settings.")
+    if len(sigma) == 0:
+        raise ValueError("No samples available for fitting.")
     # sort sigma, force and load and only select samples to generate an evenly spaced input over the sigma values
     sort_idx = jnp.argsort(sigma)
     sigma = jnp.array(sigma[sort_idx])
     force_n = jnp.array(force_n[sort_idx])
     load_n = jnp.array(load_n[sort_idx])
-    # define reference sigma values
-    sigma_ref = jnp.linspace(sigma[0], sigma[-1], options["sample_points"])
-    # find nearest values in the reference sigma values
-    tree = scp.cKDTree(sigma.reshape(-1, 1))
-    _, idx = tree.query(sigma_ref.reshape(-1, 1), k=1)
-    idx = idx.flatten()
-    sigma = sigma[idx]
-    force_n = force_n[idx]
-    load_n = load_n[idx]
+    sample_points = min(int(options["sample_points"]), len(sigma))
+    if sample_points < len(sigma):
+        # define reference sigma values
+        sigma_ref = jnp.linspace(sigma[0], sigma[-1], sample_points)
+        # find nearest values in the reference sigma values
+        tree = scp.cKDTree(sigma.reshape(-1, 1))
+        _, idx = tree.query(sigma_ref.reshape(-1, 1), k=1)
+        idx = idx.flatten()
+        sigma = sigma[idx]
+        force_n = force_n[idx]
+        load_n = load_n[idx]
     set_host_device_count(local_device_count())
     if algorithm == 'SVI':
         return svi_fitting(tire_model, sigma, force_n, load_n, params_init, params_min, params_max, options, fit_flags)

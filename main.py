@@ -8,7 +8,7 @@ from data_types.vehicleparameters import STMTireParams, MFSimpleParams
 from src.param_fitting.param_fitting import tire_param_fitting, calc_force_shift
 from src.utils.calc_vhl_states import calc_vhl_forces, calc_vhl_states
 from src.utils.datamanager import load_config, load_filtered_data, load_params, save_dataclass_to_csv, load_dataclass_from_csv
-from src.utils.evaluation_helpers import plot_bell_curves, plot_tire_curves, eval_force_errors
+from src.utils.evaluation_helpers import build_fit_excitation_samples, plot_bell_curves, plot_tire_curves, plot_excitation_histograms, eval_force_errors
 from src.utils.filter_data import preprocess_data, filter_vhl_data
 
 FIT_TARGETS = [
@@ -51,12 +51,15 @@ def main():
     tire_params_set_svi = STMTireParams()
     std_params_set_svi = STMTireParams()
     tire_params_set_nelder = STMTireParams()
+    fit_excitation_samples = build_fit_excitation_samples(vhl_states)
     if conf.mode == 'fitting':
+        fit_excitation_samples = {}
         for state_key, direction in FIT_TARGETS:
             sigma = jnp.array(getattr(getattr(vhl_states, state_key), 'sigma_' + direction))
             force_n = jnp.array(getattr(getattr(vhl_forces, state_key), 'force_' + direction + '_n'))
             load_n = jnp.array(getattr(vhl_forces, state_key).force_z_n)
             fit_flags = getattr(conf, f'fit_flags_{state_key}_{direction}')
+            fit_excitation_samples[f'{state_key}_{direction}'] = sigma
             params_init.S_V, params_init.S_H = calc_force_shift(sigma, force_n)
             print(f'Fitting - {state_key} {direction}')
             params_svi, std_svi, _ = tire_param_fitting(
@@ -99,6 +102,7 @@ def main():
     if conf.enable_plotting:
         plot_bell_curves(tire_params_set_svi,
                          std_params_set_svi, params_min, params_max)
+        plot_excitation_histograms(fit_excitation_samples)
         plot_tire_curves(vhl_states, vhl_forces,
                          tire_params_set_svi, tire_params_set_nelder)
         plt.show()

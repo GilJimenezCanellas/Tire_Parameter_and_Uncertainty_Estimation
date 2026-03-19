@@ -1,9 +1,9 @@
 ### Vehicle Measurements ###
-l_front_m = 0.87
-l_rear_m = 0.66
-tw_front_m = 1.5
+l_front_m = 0.78
+l_rear_m = 0.74
+tw_front_m = 1.2
 cog_z_m = 0.2
-tw_rear_m = 1.5 # not used
+tw_rear_m = 1.2 # not used
 ### Vehicle Intertia ###
 mass_kg = 250.0
 izz_kgm2 = 229.0
