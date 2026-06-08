@@ -239,26 +239,8 @@ def calc_vhl_forces(model: str, sensordata: FilteredData, vhlstates: STMStates, 
         tv_yaw_moment_nm = ((wheel_force_fr_n - wheel_force_fl_n) * (vhlparams.tw_front_m / 2) * jnp.cos(sensordata.gen_data.delta_f_rad) +
                             (wheel_force_rr_n - wheel_force_rl_n) * (vhlparams.tw_rear_m / 2))
 
-    # Limited Slip Differential
-    lsd_yaw_trq_nm = jnp.zeros(len(sensordata.gen_data.time))
-    if model == 'LSD-STM' and not use_motor_force_inputs:
-        # According to Gadola et al. "On the Passive Limited Slip Differential for High Performance Vehicle Applications"
-        drive_torque_nm = stm_forces.rear_axle.force_x_n * vhlparams.r_tire_unloaded_rear_m
-        # clip engine torque to maximum engine brake torque times gear ratio // assumption: max 800 Nm at wheels
-        drive_torque_nm = jnp.abs(jnp.clip(drive_torque_nm, -800, None))
-        kappa = vhlparams.slip_sensitivity_coeff
-        sigma_diff = sensordata.gen_data.omega_wheel_rl_radps - sensordata.gen_data.omega_wheel_rr_radps
-        coeff_lsd = jnp.where(stm_forces.rear_axle.force_x_n > 0,
-                              vhlparams.ratio_lock_drive, vhlparams.ratio_lock_coast)
-        torque_lsd_nm = jnp.where(jnp.abs(coeff_lsd * jnp.tanh(kappa * sigma_diff) * drive_torque_nm) < vhlparams.torque_preload_nm,
-                                  jnp.tanh(kappa * sigma_diff) * vhlparams.torque_preload_nm,
-                                  coeff_lsd * jnp.tanh(kappa * sigma_diff) * drive_torque_nm)
-        force_diff = (torque_lsd_nm / vhlparams.r_tire_unloaded_rear_m)
-        lsd_yaw_trq_nm = force_diff * vhlparams.tw_rear_m / 2
-
     force_y_front_n = (stm_forces.cog.force_y_n * vhlparams.l_rear_m + 
-                       vhlparams.izz_kgm2 * vhlstates.dd_psi - tv_yaw_moment_nm + 
-                       lsd_yaw_trq_nm) / (vhlparams.l_front_m + vhlparams.l_rear_m)
+                       vhlparams.izz_kgm2 * vhlstates.dd_psi - tv_yaw_moment_nm) / (vhlparams.l_front_m + vhlparams.l_rear_m)
     
     stm_forces.rear_axle.force_y_n = stm_forces.cog.force_y_n - force_y_front_n
     front_load_transfer_n = force_y_front_n * vhlparams.cog_z_m / vhlparams.tw_front_m

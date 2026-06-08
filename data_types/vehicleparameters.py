@@ -67,8 +67,3 @@ class VhlParams:
     cl_rear: float
     roh_air_kgpm3: float
     a_vehicle_m2: float
-    ### Limited Slip Differential ###
-    ratio_lock_drive: float
-    ratio_lock_coast: float
-    torque_preload_nm: float
-    slip_sensitivity_coeff: float
