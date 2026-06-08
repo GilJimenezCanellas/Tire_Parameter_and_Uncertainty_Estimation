@@ -1,9 +1,13 @@
-"""Fit tire parameters from AMZ MATLAB data using the bundled estimator."""
+"""AMZ tire fitting pipeline helpers.
+
+This module contains reusable pipeline logic only. Command-line entry points,
+input staging, configuration files, vehicle parameters, and output management
+are owned by the integrating repository.
+"""
 
 from __future__ import annotations
 
-import argparse
-import sys
+from dataclasses import fields, is_dataclass
 from pathlib import Path
 
 import jax.numpy as jnp
@@ -11,25 +15,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.io import loadmat
 from scipy.signal import savgol_filter
-from dataclasses import fields, is_dataclass
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-TIRE_LIB_ROOT = REPO_ROOT / "Tire_Parameter_and_Uncertainty_Estimation"
-if str(TIRE_LIB_ROOT) not in sys.path:
-    sys.path.insert(0, str(TIRE_LIB_ROOT))
 
 from data_types.sensordata import CorData, FilteredData, GenData, ImuData
 from data_types.vehicleparameters import MFSimpleParams, STMTireParams
 from src.param_fitting.param_fitting import calc_force_shift, tire_param_fitting
 from src.utils.calc_vhl_states import calc_vhl_forces, calc_vhl_states
-from src.utils.datamanager import load_config, load_params, save_dataclass_to_csv
-from src.utils.evaluation_helpers import (
-    eval_force_errors,
-    plot_bell_curves,
-    plot_excitation_histograms,
-    plot_lateral_load_colored_curves,
-    plot_tire_curves,
-)
+from src.utils.datamanager import load_params
 from src.utils.filter_data import (
     filter_vhl_data,
     fitler_data,
@@ -41,23 +32,6 @@ from src.utils.filter_data import (
 from src.utils.tiremodels import tire_model
 
 
-DEFAULT_DATA_FILE = (
-    REPO_ROOT
-    / ".."
-    / "inputs"
-    / "August"
-    # / "DV_trackdrive"
-    # / "2025-08-05_18-08-02_run_21"
-    # / "2025-08-05_18-08-02_DV_trackdrive_csv_test_v2_data.mat"
-    / "EV_autoX"
-    / "2025-08-23_15-42-21_FSG_autoX_luan"
-    / "2025-08-23_15-42-21_EV_autox_FSG_autoX_luan_data.mat"
-    # / "DV_trackdrive"
-    # / "2024-08-17_10-41-15_FSG_trackdrive"
-    # / "2024-08-17_10-41-15_DV_trackdrive_FSG_trackdrive_data.mat"
-)
-DEFAULT_CONFIG_FILE = TIRE_LIB_ROOT / "setup" / "config.toml"
-DEFAULT_VEHICLE_PARAMS = TIRE_LIB_ROOT / "setup" / "vehicle_parameters.toml"
 FIT_TARGETS = [
     ("wheel_fl", "x"),
     ("wheel_fr", "x"),
@@ -380,59 +354,6 @@ def plot_longitudinal_estimation(sensordata: FilteredData, vhl_states, vhl_force
     ax.grid(True, alpha=0.3)
     ax.legend()
 
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Estimate tire parameters from AMZ .mat data."
-    )
-    parser.add_argument(
-        "--data-file",
-        type=Path,
-        default=DEFAULT_DATA_FILE,
-        help="Path to the AMZ *_data.mat file.",
-    )
-    parser.add_argument(
-        "--config-file",
-        type=Path,
-        default=DEFAULT_CONFIG_FILE,
-        help="Estimator config TOML to use as a baseline.",
-    )
-    parser.add_argument(
-        "--vehicle-params",
-        type=Path,
-        default=DEFAULT_VEHICLE_PARAMS,
-        help="Vehicle parameter TOML file.",
-    )
-    parser.add_argument(
-        "--output-folder",
-        default="tire_params_amz_dv",
-        help="Folder name created under outputs/.",
-    )
-    parser.add_argument(
-        "--low-speed-filter",
-        type=float,
-        default=5.0,
-        help="Discard samples below this longitudinal speed in m/s.",
-    )
-    parser.add_argument(
-        "--sample-points",
-        type=int,
-        default=3000,
-        help="Sample points passed to the optimizers.",
-    )
-    parser.add_argument(
-        "--no-plot",
-        action="store_true",
-        help="Disable plots.",
-    )
-    parser.add_argument(
-        "--no-log",
-        action="store_true",
-        help="Disable CSV output logging.",
-    )
-    return parser.parse_args()
-
-
 def mat_array(mat_data: dict, *names: str, default: np.ndarray | None = None) -> np.ndarray:
     """Return the first available signal as a flat float array."""
     for name in names:
@@ -632,29 +553,18 @@ def build_filtered_data(data_file: Path, conf, vhl_params) -> FilteredData:
 
     return filtered
 
+def fit_tire_parameters(conf, sensordata, vhl_params=None):
+    """Fit tire parameters for already loaded sensor data.
 
-def configure_estimator(args: argparse.Namespace):
-    """Load the upstream config and override run-specific defaults."""
-    conf = load_config(str(args.config_file))
-    conf.mode = "fitting"
-    conf.filetype = "filtered"
-    conf.low_speed_filter_mps = args.low_speed_filter
-    conf.enable_plotting = not args.no_plot
-    conf.enable_logging = not args.no_log
-    conf.output_folder_path = str(REPO_ROOT / "Tire_Parameter_and_Uncertainty_Estimation")
-    conf.output_folder = args.output_folder
-    conf.nelder_options["sample_points"] = args.sample_points
-    conf.svi_options["sample_points"] = args.sample_points
-    conf.run_names = [args.data_file.stem]
-    return conf
-
-
-def fit_tire_parameters(conf, sensordata):
-    """Run the same fitting loop used by the bundled estimator."""
+    Vehicle parameters can be passed directly by callers that manage all
+    inputs externally. When omitted, conf.vehicle_parameter_names must point
+    to an external TOML file.
+    """
     params_min = MFSimpleParams(**conf.params_min)
     params_max = MFSimpleParams(**conf.params_max)
     params_init = MFSimpleParams(**conf.params_init)
-    vhl_params = load_params(str(conf.vehicle_parameter_names))
+    if vhl_params is None:
+        vhl_params = load_params(str(conf.vehicle_parameter_names))
 
     vhl_states = calc_vhl_states(sensordata, vhl_params)
     vhl_forces = calc_vhl_forces(conf.model, sensordata, vhl_states, vhl_params)
@@ -783,101 +693,3 @@ def fit_tire_parameters(conf, sensordata):
         tire_params_set_nelder,
         fit_excitation_samples,
     )
-
-
-def maybe_save_results(conf, tire_params_set_svi, std_params_set_svi, tire_params_set_nelder):
-    """Save fitted parameter sets to CSV files."""
-    if not conf.enable_logging:
-        return
-
-    save_dataclass_to_csv(
-        tire_params_set_svi,
-        conf.output_folder_path,
-        conf.output_folder,
-        "tire_params_svi.csv",
-    )
-    save_dataclass_to_csv(
-        std_params_set_svi,
-        conf.output_folder_path,
-        conf.output_folder,
-        "std_params_svi.csv",
-    )
-    save_dataclass_to_csv(
-        tire_params_set_nelder,
-        conf.output_folder_path,
-        conf.output_folder,
-        "tire_params_nelder.csv",
-    )
-
-
-def main() -> None:
-    args = parse_args()
-    conf = configure_estimator(args)
-    conf.vehicle_parameter_names = str(args.vehicle_params)
-    vhl_params = load_params(str(conf.vehicle_parameter_names))
-
-    sensordata = build_filtered_data(args.data_file, conf, vhl_params)
-    (
-        _vhl_params,
-        vhl_states,
-        vhl_forces,
-        params_min, 
-        params_max,
-        tire_params_set_svi,
-        std_params_set_svi,
-        tire_params_set_nelder,
-        fit_excitation_samples,
-    ) = fit_tire_parameters(conf, sensordata)
-
-    maybe_save_results(
-        conf, tire_params_set_svi, std_params_set_svi, tire_params_set_nelder
-    )
-
-    print("-" * 80)
-    print("SVI Force Errors")
-    eval_force_errors(vhl_states, vhl_forces, tire_params_set_svi)
-    print("-" * 80)
-    print("Nelder Force Errors")
-    eval_force_errors(vhl_states, vhl_forces, tire_params_set_nelder)
-    print("-" * 80)
-
-    if conf.enable_plotting:
-        vhl_states_plot = calc_vhl_states(sensordata, _vhl_params)
-        vhl_forces_plot = calc_vhl_forces(conf.model, sensordata, vhl_states_plot, _vhl_params)
-        plot_bell_curves(
-            tire_params_set_svi, std_params_set_svi, params_min, params_max
-        )
-        plot_excitation_histograms(fit_excitation_samples)
-        plot_tire_curves(
-            vhl_states,
-            vhl_forces,
-            tire_params_set_svi,
-            tire_params_set_nelder,
-            clean_plots=conf.clean_plots,
-            fit_data=fit_excitation_samples,
-        )
-        plot_lateral_load_colored_curves(
-            vhl_states,
-            vhl_forces,
-            tire_params_set_svi,
-            fit_data=fit_excitation_samples,
-        )
-        plot_lateral_estimation(
-            sensordata,
-            vhl_states_plot,
-            vhl_forces_plot,
-            _vhl_params,
-            tire_params_set_svi,
-        )
-        plot_longitudinal_estimation(
-            sensordata,
-            vhl_states_plot,
-            vhl_forces_plot,
-            _vhl_params,
-            tire_params_set_svi,
-        )
-        plt.show()
-
-
-if __name__ == "__main__":
-    main()
