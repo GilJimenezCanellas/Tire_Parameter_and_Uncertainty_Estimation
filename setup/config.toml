@@ -35,13 +35,13 @@ nelder_options = { maxiter = 10000000, sample_points = 2000 }
 svi_options = { iter_svi_MFS = 50000, step_MFS = 0.000825, sample_points = 2000 }
 params_min = {B=1.0, C=1.0, D=0.0, E=-1.0, S_H=0.0, S_V=0.0}
 params_max = {B=20.0, C=3.0, D=2.0, E=1.0, S_H=0.0, S_V=0.0}
-params_init = {B=5.0, C=1.65, D=1.5, E=-1.0, S_H=0.0, S_V=0.0}
+params_init = {B=5.0, C=1.5, D=1.5, E=0.0, S_H=0.0, S_V=0.0}
 fit_flags_wheel_fl_x = {B=true, C=true, D=true, E=true}
 fit_flags_wheel_fr_x = {B=true, C=true, D=true, E=true}
 fit_flags_wheel_rl_x = {B=true, C=true, D=true, E=true}
 fit_flags_wheel_rr_x = {B=true, C=true, D=true, E=true}
-fit_flags_front_axle_y = {B=true, C=true, D=true, E=true}
-fit_flags_rear_axle_y = {B=true, C=true, D=true, E=true}
+fit_flags_front_axle_y = {B=true, C=true, D=true, E=false}
+fit_flags_rear_axle_y = {B=true, C=true, D=true, E=false}
 
 ### Results ###
 output_folder_path = ""

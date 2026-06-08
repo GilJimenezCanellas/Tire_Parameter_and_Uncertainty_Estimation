@@ -27,6 +27,7 @@ from src.utils.evaluation_helpers import (
     eval_force_errors,
     plot_bell_curves,
     plot_excitation_histograms,
+    plot_lateral_load_colored_curves,
     plot_tire_curves,
 )
 from src.utils.filter_data import (
@@ -51,6 +52,9 @@ DEFAULT_DATA_FILE = (
     / "EV_autoX"
     / "2025-08-23_15-42-21_FSG_autoX_luan"
     / "2025-08-23_15-42-21_EV_autox_FSG_autoX_luan_data.mat"
+    # / "DV_trackdrive"
+    # / "2024-08-17_10-41-15_FSG_trackdrive"
+    # / "2024-08-17_10-41-15_DV_trackdrive_FSG_trackdrive_data.mat"
 )
 DEFAULT_CONFIG_FILE = TIRE_LIB_ROOT / "setup" / "config.toml"
 DEFAULT_VEHICLE_PARAMS = TIRE_LIB_ROOT / "setup" / "vehicle_parameters.toml"
@@ -447,7 +451,7 @@ def build_filtered_data(data_file: Path, conf, vhl_params) -> FilteredData:
     vel_x = mat_array(data_mat, "v_X_VE", "v_X_OVS", "V_x")
     vel_y = mat_array(data_mat, "v_Y_VE", "v_Y_OVS")
     yaw_rate = mat_array(data_mat, "omega_Z_VE", "omega_Z_INS", "omega_Z_OVS")
-    acc_x = mat_array(data_mat, "a_X_VE", "a_X_OVS", "a_X_INS")
+    acc_x = mat_array(data_mat, "a_X_VE", "a_X_OVS", "a_X_INS", "a_x_VE_direct")
     acc_y = mat_array(data_mat, "a_Y_VE", "a_Y_OVS", "a_Y_INS")
     # steer = mat_array(data_mat, "steering_target_rad")
     steer_fr = np.asarray(data_mat["delta_W_FR"]).squeeze()
@@ -676,15 +680,15 @@ def fit_tire_parameters(conf, sensordata):
     # Transient rejection
     vhl_states, vhl_forces, steady_mask = reject_transient_data(
         sensordata, vhl_states, vhl_forces, 
-        max_yaw_accel_radps2=0.8, 
-        max_steer_vel_radps=0.4,
+        max_yaw_accel_radps2=4.0, 
+        max_steer_vel_radps=1.0,
         return_mask=True,
     )
     delta_dot = jnp.array(np.asarray(delta_dot)[steady_mask])
 
     # Outlier rejection
     if conf.vhl_data_filter:
-        vhl_states, vhl_forces, outlier_mask = filter_vhl_data(vhl_states, vhl_forces, 2.0, return_mask=True)
+        vhl_states, vhl_forces, outlier_mask = filter_vhl_data(vhl_states, vhl_forces, 1.8, return_mask=True)
         delta_dot = jnp.array(np.asarray(delta_dot)[outlier_mask])
 
     tire_params_set_svi = STMTireParams()
@@ -850,6 +854,12 @@ def main() -> None:
             tire_params_set_svi,
             tire_params_set_nelder,
             clean_plots=conf.clean_plots,
+            fit_data=fit_excitation_samples,
+        )
+        plot_lateral_load_colored_curves(
+            vhl_states,
+            vhl_forces,
+            tire_params_set_svi,
             fit_data=fit_excitation_samples,
         )
         plot_lateral_estimation(

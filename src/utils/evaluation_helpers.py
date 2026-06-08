@@ -222,6 +222,49 @@ def _clean_plot_points(sigma, load_n, force_n, svi_params, trim_fraction: float 
     return sigma[keep_mask], load_n[keep_mask], force_n[keep_mask]
 
 
+def _extract_fit_series(vehicle_states: STMStates, vehicle_forces: STMForces, fit_data: dict | None,
+                        state_key: str, param_key: str, direction: str):
+    '''Return sigma, load, and force arrays from fit samples when available, otherwise raw states/forces.'''
+    if fit_data and param_key in fit_data:
+        sigma = _to_numpy(fit_data[param_key].get('sigma', []))
+        load_n = _to_numpy(fit_data[param_key].get('load_n', []))
+        force_n = _to_numpy(fit_data[param_key].get('force_n', []))
+    else:
+        sigma = _to_numpy(getattr(getattr(vehicle_states, state_key), f'sigma_{direction}'))
+        load_n = _to_numpy(getattr(getattr(vehicle_forces, state_key), 'force_z_n'))
+        force_n = _to_numpy(getattr(getattr(vehicle_forces, state_key), f'force_{direction}_n'))
+    return sigma, load_n, force_n
+
+
+def _build_load_regions(load_n, num_regions: int):
+    '''Split Fz values into monotonic quantile-based regions and skip empty regions.'''
+    load_n = np.asarray(load_n, dtype=float).ravel()
+    if load_n.size == 0:
+        return []
+    if load_n.size == 1:
+        eps = max(abs(float(load_n[0])) * 1.0e-6, 1.0e-6)
+        return [(load_n[0] - eps, load_n[0] + eps, np.array([True]))]
+
+    quantiles = np.linspace(0.0, 1.0, min(max(num_regions, 1), load_n.size) + 1)
+    edges = np.quantile(load_n, quantiles)
+    edges = np.unique(edges)
+    if edges.size < 2:
+        eps = max(abs(float(edges[0])) * 1.0e-6, 1.0e-6)
+        edges = np.array([edges[0] - eps, edges[0] + eps], dtype=float)
+
+    regions = []
+    for region_idx in range(len(edges) - 1):
+        lower_edge = float(edges[region_idx])
+        upper_edge = float(edges[region_idx + 1])
+        if region_idx == len(edges) - 2:
+            mask = (load_n >= lower_edge) & (load_n <= upper_edge)
+        else:
+            mask = (load_n >= lower_edge) & (load_n < upper_edge)
+        if np.any(mask):
+            regions.append((lower_edge, upper_edge, mask))
+    return regions
+
+
 def plot_tire_curves(vehicle_states: STMStates, vehicle_forces: STMForces,
                      tire_params_set_svi: STMTireParams, tire_params_set_nelder: STMTireParams,
                      clean_plots: bool = False, fit_data: dict | None = None):
@@ -270,6 +313,64 @@ def plot_tire_curves(vehicle_states: STMStates, vehicle_forces: STMForces,
     fig.legend(['SVI', 'Nelder-Mead'], loc='upper center',
                bbox_to_anchor=(0.5, 0.04), ncol=2, fontsize=10, frameon=False)
     plt.tight_layout()
+
+
+def plot_lateral_load_colored_curves(vehicle_states: STMStates, vehicle_forces: STMForces,
+                                     tire_params_set: STMTireParams, fit_data: dict | None = None,
+                                     num_load_regions: int = 4):
+    '''Plot normalized lateral samples grouped by Fz regions for front and rear axles.'''
+    column_width = 10
+    fig, axes = plt.subplots(1, 2, figsize=(column_width, 4.6), sharey=True, constrained_layout=True)
+
+    for ax, (state_key, param_key, title, _) in zip(axes, LATERAL_TARGETS):
+        sigma, load_n, force_n = _extract_fit_series(vehicle_states, vehicle_forces, fit_data, state_key, param_key, 'y')
+        if sigma.size == 0:
+            ax.set_title(f'{title}\nNo data')
+            ax.set_xlabel('Slip Angle in rad')
+            ax.grid(True, alpha=0.25)
+            continue
+
+        safe_load_n = np.maximum(np.abs(load_n), 1.0e-6)
+        load_regions = _build_load_regions(load_n, num_load_regions)
+        cmap = plt.get_cmap('viridis', max(len(load_regions), 1))
+        slip_margin = max(0.02, 0.05 * max(np.max(np.abs(sigma)), 1.0e-3))
+        slip_plot = jnp.linspace(float(np.min(sigma) - slip_margin), float(np.max(sigma) + slip_margin), 250)
+
+        for region_idx, (lower_edge, upper_edge, mask) in enumerate(load_regions):
+            region_sigma = sigma[mask]
+            region_force_norm = force_n[mask] / safe_load_n[mask]
+            region_load_ref = float(np.median(load_n[mask]))
+            region_curve = tire_model(
+                'MFSimple',
+                slip_plot,
+                region_load_ref,
+                getattr(tire_params_set, param_key),
+            ) / region_load_ref
+            color = cmap(region_idx)
+            ax.scatter(
+                region_sigma,
+                region_force_norm,
+                s=10,
+                alpha=0.65,
+                color=color,
+                edgecolors='none',
+            )
+            ax.plot(
+                slip_plot,
+                region_curve,
+                color=color,
+                linewidth=2.0,
+                label=f'{lower_edge:.0f}-{upper_edge:.0f} N (n={int(np.count_nonzero(mask))})',
+            )
+
+        ax.set_title(f'{title}\nNormalized samples grouped by Fz')
+        ax.set_xlabel('Slip Angle in rad')
+        ax.grid(True, alpha=0.3)
+        ax.legend(frameon=False, fontsize=9, title='Fz regions')
+
+    axes[0].set_ylabel('Lateral Force / Vertical Load')
+    fig.suptitle('Lateral Tire Curves With Fz-Colored Samples', fontsize=14)
+
 
 def eval_force_errors(vehicle_states: STMStates, vehicle_forces: STMForces,
                       tire_params_set: STMTireParams):
