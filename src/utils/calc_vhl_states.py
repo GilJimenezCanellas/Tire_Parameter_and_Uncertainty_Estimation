@@ -246,7 +246,7 @@ def calc_vhl_forces(model: str, sensordata: FilteredData, vhlstates: STMStates, 
         drive_torque_nm = stm_forces.rear_axle.force_x_n * vhlparams.r_tire_unloaded_rear_m
         # clip engine torque to maximum engine brake torque times gear ratio // assumption: max 800 Nm at wheels
         drive_torque_nm = jnp.abs(jnp.clip(drive_torque_nm, -800, None))
-        kappa = 0.5  # slip sensitivity coefficient
+        kappa = vhlparams.slip_sensitivity_coeff
         sigma_diff = sensordata.gen_data.omega_wheel_rl_radps - sensordata.gen_data.omega_wheel_rr_radps
         coeff_lsd = jnp.where(stm_forces.rear_axle.force_x_n > 0,
                               vhlparams.ratio_lock_drive, vhlparams.ratio_lock_coast)
