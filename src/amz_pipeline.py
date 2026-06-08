@@ -45,6 +45,36 @@ BALANCE_TARGET_POINTS_PER_REGION = 250
 BALANCE_MAX_REGIONS = 12
 
 
+def _clip_shift_component(name: str, value: float, params_min: MFSimpleParams,
+                          params_max: MFSimpleParams) -> tuple[float, bool]:
+    """Clip one force-shift component to the configured parameter bounds."""
+    lower_bound = float(getattr(params_min, name))
+    upper_bound = float(getattr(params_max, name))
+    if lower_bound > upper_bound:
+        raise ValueError(
+            f"Invalid {name} bounds: min {lower_bound} is greater than max {upper_bound}."
+        )
+    clipped_value = float(np.clip(value, lower_bound, upper_bound))
+    return clipped_value, not np.isclose(clipped_value, float(value), rtol=0.0, atol=1.0e-12)
+
+
+def _clip_lateral_force_shift(vertical_shift_n: float, horizontal_shift_rad: float,
+                              params_min: MFSimpleParams,
+                              params_max: MFSimpleParams) -> tuple[float, float, bool]:
+    """Clip lateral S_V and S_H estimates before they are used by the fitters."""
+    clipped_vertical_shift_n, vertical_was_clipped = _clip_shift_component(
+        "S_V", vertical_shift_n, params_min, params_max
+    )
+    clipped_horizontal_shift_rad, horizontal_was_clipped = _clip_shift_component(
+        "S_H", horizontal_shift_rad, params_min, params_max
+    )
+    return (
+        clipped_vertical_shift_n,
+        clipped_horizontal_shift_rad,
+        vertical_was_clipped or horizontal_was_clipped,
+    )
+
+
 def calc_total_lateral_force_body_n_from_pacejka(sensordata: FilteredData, vhl_states, vhl_forces,
                                                  tire_params_set: STMTireParams) -> jnp.array:
     """Estimate body-frame lateral force from measured slip angles, Fz, and fitted Pacejka parameters."""
@@ -640,9 +670,31 @@ def fit_tire_parameters(conf, sensordata, vhl_params=None):
         print(f"Region occupancy kept:   {balanced_samples['region_counts_after']}")
 
         try:
-            params_init.S_V, params_init.S_H = calc_force_shift(sigma, force_n)
+            shift_source = "balanced"
+            shift_s_v, shift_s_h = calc_force_shift(sigma, force_n)
         except ValueError:
-            params_init.S_V, params_init.S_H = calc_force_shift(sigma_raw, force_n_raw)
+            shift_source = "raw"
+            shift_s_v, shift_s_h = calc_force_shift(sigma_raw, force_n_raw)
+
+        if direction == "y":
+            unclipped_s_v = shift_s_v
+            unclipped_s_h = shift_s_h
+            shift_s_v, shift_s_h, shift_was_clipped = _clip_lateral_force_shift(
+                shift_s_v, shift_s_h, params_min, params_max
+            )
+            if shift_was_clipped:
+                print(
+                    f"Lateral force shift clipped - {state_key}: "
+                    f"S_V {unclipped_s_v:.6g} -> {shift_s_v:.6g}, "
+                    f"S_H {unclipped_s_h:.6g} -> {shift_s_h:.6g}"
+                )
+
+        params_init.S_V = shift_s_v
+        params_init.S_H = shift_s_h
+        print(
+            f"Force shift - {state_key} {direction} ({shift_source} samples): "
+            f"S_V={params_init.S_V:.6g}, S_H={params_init.S_H:.6g}"
+        )
         print(f"Fitting - {state_key} {direction}")
         svi_options = dict(conf.svi_options)
         nelder_options = dict(conf.nelder_options)

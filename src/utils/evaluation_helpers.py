@@ -316,60 +316,60 @@ def plot_tire_curves(vehicle_states: STMStates, vehicle_forces: STMForces,
 
 
 def plot_lateral_load_colored_curves(vehicle_states: STMStates, vehicle_forces: STMForces,
-                                     tire_params_set: STMTireParams, fit_data: dict | None = None,
+                                     tire_params_set: STMTireParams | None = None, fit_data: dict | None = None,
                                      num_load_regions: int = 4):
-    '''Plot normalized lateral samples grouped by Fz regions for front and rear axles.'''
-    column_width = 10
-    fig, axes = plt.subplots(1, 2, figsize=(column_width, 4.6), sharey=True, constrained_layout=True)
+    '''Plot front/rear lateral force against slip angle with Fz encoded as color.
 
-    for ax, (state_key, param_key, title, _) in zip(axes, LATERAL_TARGETS):
+    When balanced fit samples are passed through fit_data, the plot shows exactly
+    the samples used by the tire fit. Otherwise it falls back to all filtered
+    post-rejection state/force samples.
+    '''
+    del tire_params_set, num_load_regions
+
+    column_width = 10
+    fig, axes = plt.subplots(1, 2, figsize=(column_width, 4.8), sharey=True, constrained_layout=True)
+
+    lateral_series = []
+    for state_key, param_key, title, _ in LATERAL_TARGETS:
         sigma, load_n, force_n = _extract_fit_series(vehicle_states, vehicle_forces, fit_data, state_key, param_key, 'y')
+        finite_mask = np.isfinite(sigma) & np.isfinite(load_n) & np.isfinite(force_n)
+        lateral_series.append((title, sigma[finite_mask], load_n[finite_mask], force_n[finite_mask]))
+
+    load_sets = [load_n for _, _, load_n, _ in lateral_series if load_n.size]
+    all_loads = np.concatenate(load_sets) if load_sets else np.array([], dtype=float)
+    color_norm = None
+    if all_loads.size:
+        color_norm = plt.Normalize(float(np.min(all_loads)), float(np.max(all_loads)))
+
+    scatter_handle = None
+    for ax, (title, sigma, load_n, force_n) in zip(axes, lateral_series):
         if sigma.size == 0:
             ax.set_title(f'{title}\nNo data')
-            ax.set_xlabel('Slip Angle in rad')
+            ax.set_xlabel('Slip Angle [rad]')
             ax.grid(True, alpha=0.25)
             continue
 
-        safe_load_n = np.maximum(np.abs(load_n), 1.0e-6)
-        load_regions = _build_load_regions(load_n, num_load_regions)
-        cmap = plt.get_cmap('viridis', max(len(load_regions), 1))
-        slip_margin = max(0.02, 0.05 * max(np.max(np.abs(sigma)), 1.0e-3))
-        slip_plot = jnp.linspace(float(np.min(sigma) - slip_margin), float(np.max(sigma) + slip_margin), 250)
-
-        for region_idx, (lower_edge, upper_edge, mask) in enumerate(load_regions):
-            region_sigma = sigma[mask]
-            region_force_norm = force_n[mask] / safe_load_n[mask]
-            region_load_ref = float(np.median(load_n[mask]))
-            region_curve = tire_model(
-                'MFSimple',
-                slip_plot,
-                region_load_ref,
-                getattr(tire_params_set, param_key),
-            ) / region_load_ref
-            color = cmap(region_idx)
-            ax.scatter(
-                region_sigma,
-                region_force_norm,
-                s=10,
-                alpha=0.65,
-                color=color,
-                edgecolors='none',
-            )
-            ax.plot(
-                slip_plot,
-                region_curve,
-                color=color,
-                linewidth=2.0,
-                label=f'{lower_edge:.0f}-{upper_edge:.0f} N (n={int(np.count_nonzero(mask))})',
-            )
-
-        ax.set_title(f'{title}\nNormalized samples grouped by Fz')
-        ax.set_xlabel('Slip Angle in rad')
+        scatter_handle = ax.scatter(
+            sigma,
+            force_n,
+            c=load_n,
+            cmap='viridis',
+            norm=color_norm,
+            s=8,
+            alpha=0.75,
+            edgecolors='none',
+        )
+        ax.axhline(0.0, color='#333333', linestyle='--', linewidth=0.8, alpha=0.65)
+        ax.axvline(0.0, color='#333333', linestyle='--', linewidth=0.8, alpha=0.65)
+        ax.set_title(title)
+        ax.set_xlabel('Slip Angle [rad]')
         ax.grid(True, alpha=0.3)
-        ax.legend(frameon=False, fontsize=9, title='Fz regions')
 
-    axes[0].set_ylabel('Lateral Force / Vertical Load')
-    fig.suptitle('Lateral Tire Curves With Fz-Colored Samples', fontsize=14)
+    axes[0].set_ylabel('Lateral Force Fy [N]')
+    if scatter_handle is not None:
+        colorbar = fig.colorbar(scatter_handle, ax=axes, shrink=0.95, pad=0.02)
+        colorbar.set_label('Vertical Load Fz [N]')
+    fig.suptitle('Lateral Fy vs Slip Angle Colored By Fz', fontsize=14)
 
 
 def eval_force_errors(vehicle_states: STMStates, vehicle_forces: STMForces,
