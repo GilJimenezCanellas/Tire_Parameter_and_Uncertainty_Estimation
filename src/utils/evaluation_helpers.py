@@ -318,7 +318,7 @@ def plot_tire_curves(vehicle_states: STMStates, vehicle_forces: STMForces,
 def plot_lateral_load_colored_curves(vehicle_states: STMStates, vehicle_forces: STMForces,
                                      tire_params_set: STMTireParams | None = None, fit_data: dict | None = None,
                                      num_load_regions: int = 4):
-    '''Plot front/rear lateral force against slip angle with Fz encoded as color.
+    '''Plot front/rear lateral friction coefficient against slip angle with Fz encoded as color.
 
     When balanced fit samples are passed through fit_data, the plot shows exactly
     the samples used by the tire fit. Otherwise it falls back to all filtered
@@ -332,8 +332,16 @@ def plot_lateral_load_colored_curves(vehicle_states: STMStates, vehicle_forces: 
     lateral_series = []
     for state_key, param_key, title, _ in LATERAL_TARGETS:
         sigma, load_n, force_n = _extract_fit_series(vehicle_states, vehicle_forces, fit_data, state_key, param_key, 'y')
-        finite_mask = np.isfinite(sigma) & np.isfinite(load_n) & np.isfinite(force_n)
-        lateral_series.append((title, sigma[finite_mask], load_n[finite_mask], force_n[finite_mask]))
+        finite_mask = (
+            np.isfinite(sigma)
+            & np.isfinite(load_n)
+            & np.isfinite(force_n)
+            & (np.abs(load_n) > 1.0e-9)
+        )
+        sigma = sigma[finite_mask]
+        load_n = load_n[finite_mask]
+        mu_y = force_n[finite_mask] / load_n
+        lateral_series.append((title, sigma, load_n, mu_y))
 
     load_sets = [load_n for _, _, load_n, _ in lateral_series if load_n.size]
     all_loads = np.concatenate(load_sets) if load_sets else np.array([], dtype=float)
@@ -342,7 +350,7 @@ def plot_lateral_load_colored_curves(vehicle_states: STMStates, vehicle_forces: 
         color_norm = plt.Normalize(float(np.min(all_loads)), float(np.max(all_loads)))
 
     scatter_handle = None
-    for ax, (title, sigma, load_n, force_n) in zip(axes, lateral_series):
+    for ax, (title, sigma, load_n, mu_y) in zip(axes, lateral_series):
         if sigma.size == 0:
             ax.set_title(f'{title}\nNo data')
             ax.set_xlabel('Slip Angle [rad]')
@@ -351,7 +359,7 @@ def plot_lateral_load_colored_curves(vehicle_states: STMStates, vehicle_forces: 
 
         scatter_handle = ax.scatter(
             sigma,
-            force_n,
+            mu_y,
             c=load_n,
             cmap='viridis',
             norm=color_norm,
@@ -365,11 +373,11 @@ def plot_lateral_load_colored_curves(vehicle_states: STMStates, vehicle_forces: 
         ax.set_xlabel('Slip Angle [rad]')
         ax.grid(True, alpha=0.3)
 
-    axes[0].set_ylabel('Lateral Force Fy [N]')
+    axes[0].set_ylabel('Lateral Friction Coefficient mu_y = Fy / Fz [-]')
     if scatter_handle is not None:
         colorbar = fig.colorbar(scatter_handle, ax=axes, shrink=0.95, pad=0.02)
         colorbar.set_label('Vertical Load Fz [N]')
-    fig.suptitle('Lateral Fy vs Slip Angle Colored By Fz', fontsize=14)
+    fig.suptitle('Lateral mu_y vs Slip Angle Colored By Fz', fontsize=14)
 
 
 def eval_force_errors(vehicle_states: STMStates, vehicle_forces: STMForces,
