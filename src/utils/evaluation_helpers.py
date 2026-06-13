@@ -330,6 +330,7 @@ def plot_tire_curves(vehicle_states: STMStates, vehicle_forces: STMForces,
         ax[plot_pos].set_title(title)
         ax[plot_pos].set_ylabel('Tire Force / Tire Load')
         ax[plot_pos].set_xlabel('Slip Ratio' if direction == 'x' else 'Slip Angle in rad')
+        ax[plot_pos].grid(True, alpha=0.3)
     fig.legend(['SVI', 'Nelder-Mead'], loc='upper center',
                bbox_to_anchor=(0.5, 0.04), ncol=2, fontsize=10, frameon=False)
     plt.tight_layout()
