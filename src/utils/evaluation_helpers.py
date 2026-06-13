@@ -214,6 +214,7 @@ def plot_bell_curves(params: STMTireParams, std_params: STMTireParams, params_mi
         axes[i].set_ylabel('Probability Density', fontsize=10)
         axes[i].set_xlim(params_min.__dict__[param_name],
                          params_max.__dict__[param_name])
+        axes[i].grid(True, alpha=0.3)
         fig.legend(labels=used_labels, loc='upper center', bbox_to_anchor=(
             0.5, 0.05), ncol=3, frameon=False, fontsize=10)
     plt.tight_layout()
