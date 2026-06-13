@@ -323,3 +323,49 @@ def select_balanced_fit_samples(sigma_values, force_values, load_values, yaw_acc
         'region_counts_after': quotas.tolist(),
         'transient_score': jnp.array(transient_score[selected_indices]),
     }
+
+
+def select_steady_fit_samples(sigma_values, force_values, load_values, yaw_accel_values, steer_vel_values,
+                              target_count: int, yaw_weight: float = 1.0, steer_weight: float = 1.0):
+    '''Select the least-transient samples globally, without balancing slip regions.'''
+    sigma_values = np.asarray(sigma_values, dtype=float).ravel()
+    force_values = np.asarray(force_values, dtype=float).ravel()
+    load_values = np.asarray(load_values, dtype=float).ravel()
+    yaw_accel_values = np.asarray(yaw_accel_values, dtype=float).ravel()
+    steer_vel_values = np.asarray(steer_vel_values, dtype=float).ravel()
+
+    valid_mask = np.isfinite(sigma_values) & np.isfinite(force_values) & np.isfinite(load_values)
+    valid_mask &= np.isfinite(yaw_accel_values) & np.isfinite(steer_vel_values)
+    sigma_values = sigma_values[valid_mask]
+    force_values = force_values[valid_mask]
+    load_values = load_values[valid_mask]
+    yaw_accel_values = yaw_accel_values[valid_mask]
+    steer_vel_values = steer_vel_values[valid_mask]
+
+    if sigma_values.size == 0:
+        return {
+            'sigma': jnp.array([]),
+            'force_n': jnp.array([]),
+            'load_n': jnp.array([]),
+            'region_edges': np.array([-np.inf, np.inf], dtype=float),
+            'region_counts_before': [],
+            'region_counts_after': [],
+            'transient_score': jnp.array([]),
+        }
+
+    target_count = max(1, min(int(target_count), sigma_values.size))
+    yaw_scale = _robust_abs_scale(yaw_accel_values)
+    steer_scale = _robust_abs_scale(steer_vel_values)
+    transient_score = yaw_weight * np.abs(yaw_accel_values) / yaw_scale
+    transient_score += steer_weight * np.abs(steer_vel_values) / steer_scale
+    selected_indices = np.sort(np.argsort(transient_score, kind='stable')[:target_count])
+
+    return {
+        'sigma': jnp.array(sigma_values[selected_indices]),
+        'force_n': jnp.array(force_values[selected_indices]),
+        'load_n': jnp.array(load_values[selected_indices]),
+        'region_edges': np.array([-np.inf, np.inf], dtype=float),
+        'region_counts_before': [int(sigma_values.size)],
+        'region_counts_after': [int(selected_indices.size)],
+        'transient_score': jnp.array(transient_score[selected_indices]),
+    }

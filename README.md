@@ -19,6 +19,8 @@ It intentionally does not provide top-level main scripts, bundled input data, bu
 - `fit_tire_parameters(conf, sensordata, vhl_params=None)` fits the configured tire model. By default it fits only `front_axle_y` and `rear_axle_y`; set `conf.fit_longitudinal = True` to also fit the four wheel longitudinal targets.
 - `plot_lateral_estimation(...)` and `plot_longitudinal_estimation(...)` provide optional diagnostics.
 
+Set `conf.skidpad_mode = True` to add an initial `abs(ay)` threshold and select the least-transient fit samples globally instead of enforcing equal sample quotas across slip-angle regions.
+
 The caller is responsible for loading `conf` and `vhl_params`, choosing output paths, writing results, and deciding whether plots should be shown.
 
 ## Dependencies

@@ -31,6 +31,7 @@ from src.utils.filter_data import (
     imu_offset_correction,
     reject_transient_data,
     select_balanced_fit_samples,
+    select_steady_fit_samples,
     vel_offset_correction,
 )
 from src.utils.tiremodels import tire_model
@@ -610,7 +611,17 @@ def _finalize_filtered_sections(data_cor: CorData, data_imu: ImuData, data_gen: 
         _required_input_matrix(data_cor, data_imu, data_gen, include_motor_speeds, include_force_inputs)
     ).all(axis=1)
     speed_mask = np.asarray(data_cor.vel_cog_x_mps) > conf.low_speed_filter_mps
-    filtered = _copy_masked_sections(data_cor, data_imu, data_gen, finite_mask & speed_mask)
+    initial_mask = finite_mask & speed_mask
+    if bool(getattr(conf, "skidpad_mode", False)):
+        min_abs_ay_mps2 = max(float(getattr(conf, "skidpad_min_abs_ay_mps2", 0.0)), 0.0)
+        lateral_accel_mask = np.abs(np.asarray(data_imu.acc_cog_y_mps2, dtype=float)) > min_abs_ay_mps2
+        initial_mask &= lateral_accel_mask
+        print(
+            "Skidpad lateral-acceleration filter: "
+            f"kept {int(np.count_nonzero(initial_mask))}/{initial_mask.size} rows "
+            f"with |ay| > {min_abs_ay_mps2:.3g} m/s^2."
+        )
+    filtered = _copy_masked_sections(data_cor, data_imu, data_gen, initial_mask)
 
     validate_required_sensor_signals(
         filtered,
@@ -1147,24 +1158,36 @@ def fit_tire_parameters(conf, sensordata, vhl_params=None):
         load_n_raw = jnp.array(getattr(vhl_forces, state_key).force_z_n)
         fit_flags = getattr(conf, f"fit_flags_{state_key}_{direction}")
         param_key = f"{state_key}_{direction}"
-        balanced_samples = select_balanced_fit_samples(
-            sigma_raw,
-            force_n_raw,
-            load_n_raw,
-            vhl_states.dd_psi,
-            delta_dot,
-            target_count=target_sample_points,
-            tail_quantile=BALANCE_TAIL_QUANTILE,
-            target_points_per_region=BALANCE_TARGET_POINTS_PER_REGION,
-            max_regions=BALANCE_MAX_REGIONS,
-        )
+        if bool(getattr(conf, "skidpad_mode", False)):
+            balanced_samples = select_steady_fit_samples(
+                sigma_raw,
+                force_n_raw,
+                load_n_raw,
+                vhl_states.dd_psi,
+                delta_dot,
+                target_count=target_sample_points,
+            )
+            selection_label = "Skidpad steady-state selection"
+        else:
+            balanced_samples = select_balanced_fit_samples(
+                sigma_raw,
+                force_n_raw,
+                load_n_raw,
+                vhl_states.dd_psi,
+                delta_dot,
+                target_count=target_sample_points,
+                tail_quantile=BALANCE_TAIL_QUANTILE,
+                target_points_per_region=BALANCE_TARGET_POINTS_PER_REGION,
+                max_regions=BALANCE_MAX_REGIONS,
+            )
+            selection_label = "Balanced selection"
         sigma = jnp.array(balanced_samples["sigma"])
         force_n = jnp.array(balanced_samples["force_n"])
         load_n = jnp.array(balanced_samples["load_n"])
         fit_excitation_samples[param_key] = balanced_samples
 
         print(
-            f"Balanced selection - {state_key} {direction}: "
+            f"{selection_label} - {state_key} {direction}: "
             f"kept {len(sigma)}/{len(sigma_raw)} samples "
             f"across {len(balanced_samples['region_counts_after'])} regions"
         )
