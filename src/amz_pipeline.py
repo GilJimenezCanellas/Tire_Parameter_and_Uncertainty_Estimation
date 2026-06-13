@@ -68,16 +68,16 @@ class RosbagTopicSpec:
 
 AMZ_ROSBAG_TOPICS = {
     "velocity": RosbagTopicSpec(
-        "/vcu_msgs/velocity_estimation",
-        "vcu_msgs/msg/VelocityEstimation",
+        "/vcu/nera/velocity_estimation",
+        "autonomous_msgs_nera/msg/VelocityEstimation",
     ),
     "torque": RosbagTopicSpec(
-        "/vcu_msgs/torque_data",
-        "vcu_msgs/msg/TorqueData",
+        "/vcu/nera/torque_data",
+        "autonomous_msgs_nera/msg/TorqueData",
     ),
     "steering": RosbagTopicSpec(
-        "/vcu_msgs/steering_feedback",
-        "autonomous_msgs/msg/DoubleStamped",
+        "/vcu/nera/steering_feedback",
+        "autonomous_msgs_nera/msg/DoubleStamped",
     ),
 }
 
@@ -692,11 +692,11 @@ def _validate_amz_rosbag_topics(topic_types: dict[str, str]) -> dict[str, str]:
 def _extract_amz_rosbag_values(role: str, msg) -> dict[str, float]:
     if role == "velocity":
         return {
-            "vel_x": float(msg.vel.x),
-            "vel_y": float(msg.vel.y),
-            "yaw_rate": float(msg.vel.theta),
-            "acc_x": float(msg.acc.x),
-            "acc_y": float(msg.acc.y),
+            "vel_x": float(msg.velocities.x),
+            "vel_y": float(msg.velocities.y),
+            "yaw_rate": float(msg.velocities.theta),
+            "acc_x": float(msg.accelerations.x),
+            "acc_y": float(msg.accelerations.y),
         }
 
     if role == "torque":
@@ -769,10 +769,19 @@ def _read_rosbag_signal_series(data_file: Path,
     topic_types = {topic.name: topic.type for topic in reader.get_all_topics_and_types()}
     resolved_topics = _validate_amz_rosbag_topics(topic_types)
     role_by_topic = {topic: role for role, topic in resolved_topics.items()}
-    msg_classes = {
-        topic: get_message(topic_types[topic])
-        for topic in role_by_topic
-    }
+    try:
+        msg_classes = {
+            topic: get_message(topic_types[topic])
+            for topic in role_by_topic
+        }
+    except (AttributeError, ImportError, ModuleNotFoundError, ValueError) as exc:
+        required_types = ", ".join(sorted({topic_types[topic] for topic in role_by_topic}))
+        raise ImportError(
+            "ROS bag input can open the bag, but cannot load the generated Python "
+            "message classes needed to deserialize it. Source a colcon overlay that "
+            "contains these message packages and was built with the same ROS "
+            f"distribution and Python ABI as this process. Required message types: {required_types}."
+        ) from exc
 
     samples_by_role = {role: [] for role in resolved_topics}
     while reader.has_next():
@@ -780,7 +789,15 @@ def _read_rosbag_signal_series(data_file: Path,
         role = role_by_topic.get(topic)
         if role is None:
             continue
-        msg = deserialize_message(serialized_data, msg_classes[topic])
+        try:
+            msg = deserialize_message(serialized_data, msg_classes[topic])
+        except (AttributeError, ImportError, ModuleNotFoundError, RuntimeError) as exc:
+            raise ImportError(
+                "ROS bag input loaded the message class but failed to deserialize "
+                f"topic '{topic}' of type '{topic_types[topic]}'. This usually means "
+                "the generated ROS Python bindings were built for a different ROS "
+                "distribution or Python version than the process running the fit script."
+            ) from exc
         values = _extract_amz_rosbag_values(role, msg)
         samples_by_role[role].append((_message_time_s(msg, timestamp_ns), values))
 

@@ -15,7 +15,7 @@ It intentionally does not provide top-level main scripts, bundled input data, bu
 `src.amz_pipeline` exposes the reusable AMZ pipeline pieces used by `autonomous_2026`:
 
 - `build_filtered_data(data_file, conf, vhl_params)` maps an AMZ `*_data.mat` file into the estimator dataclasses.
-- `build_filtered_data_from_rosbag(data_file, conf, vhl_params, ...)` maps an AMZ ROS 2 MCAP bag into the same dataclasses. It reads `/vcu_msgs/velocity_estimation`, `/vcu_msgs/steering_feedback`, and `/vcu_msgs/torque_data`, matching the reference bag `rosbag2_2025_08_22-18_06_08_0.mcap`. Because current bags do not contain wheel-speed feedback, it uses synthesized rolling wheel speeds for lateral state calculation, ideal torque-to-force conversion for `Fx`, and rejects longitudinal tire fitting.
+- `build_filtered_data_from_rosbag(data_file, conf, vhl_params, ...)` maps an AMZ ROS 2 MCAP bag into the same dataclasses. It reads `/vcu/nera/velocity_estimation`, `/vcu/nera/steering_feedback`, and `/vcu/nera/torque_data`. Because current bags do not contain wheel-speed feedback, it uses synthesized rolling wheel speeds for lateral state calculation, ideal torque-to-force conversion for `Fx`, and rejects longitudinal tire fitting.
 - `fit_tire_parameters(conf, sensordata, vhl_params=None)` fits the configured tire model. By default it fits only `front_axle_y` and `rear_axle_y`; set `conf.fit_longitudinal = True` to also fit the four wheel longitudinal targets.
 - `plot_lateral_estimation(...)` and `plot_longitudinal_estimation(...)` provide optional diagnostics.
 
@@ -24,6 +24,8 @@ The caller is responsible for loading `conf` and `vhl_params`, choosing output p
 ## Dependencies
 
 Install the pinned Python dependencies from `requirements.txt`. In `autonomous_2026`, this is done through `tools/sys_id/tires/requirements.txt`, which delegates to this file from the submodule checkout.
+
+MCAP input also needs a sourced ROS 2 environment with `rosbag2_py`, `rclpy`, `rosidl_runtime_py`, and the generated AMZ message packages used by the bag. Build and source those message packages with the same ROS distribution and Python version used by the fit process.
 
 ## References
 
