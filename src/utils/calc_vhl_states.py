@@ -130,6 +130,14 @@ def calc_wheel_force_from_torque(motor_torque_nm: jnp.array, wheel_speed_radps: 
     return (wheel_torque_nm - wheel_inertia_kgm2 * wheel_acc_radps2 - 35) / safe_radius_m
 
 
+def calc_wheel_force_from_ideal_torque(motor_torque_nm: jnp.array, gear_ratio: float,
+                                       wheel_radius_m: jnp.array):
+    '''Estimate wheel longitudinal force with an ideal torque-to-ground-force model.'''
+    wheel_torque_nm = motor_torque_nm * gear_ratio
+    safe_radius_m = jnp.maximum(jnp.abs(wheel_radius_m), 1.0e-6)
+    return wheel_torque_nm / safe_radius_m
+
+
 def calc_vhl_states(sensordata: FilteredData, vhlparams: VhlParams, stm_states: STMStates = STMStates()):
     ''' Calculate Vehicle States '''
     validate_required_sensor_signals(sensordata)
@@ -187,7 +195,8 @@ def calc_vhl_states(sensordata: FilteredData, vhlparams: VhlParams, stm_states: 
     return stm_states
 
 
-def calc_vhl_forces(model: str, sensordata: FilteredData, vhlstates: STMStates, vhlparams: VhlParams, stm_forces: STMForces = STMForces()):
+def calc_vhl_forces(model: str, sensordata: FilteredData, vhlstates: STMStates, vhlparams: VhlParams,
+                    stm_forces: STMForces = STMForces(), longitudinal_force_mode: str = "wheel_dynamics"):
     ''' Calculate Vehicle and Tire Forces '''
     validate_required_sensor_signals(sensordata, include_force_inputs=True)
     force_drag_n = 0.5 * vhlparams.roh_air_kgpm3 * vhlparams.a_vehicle_m2 * vhlparams.cw * \
@@ -204,38 +213,57 @@ def calc_vhl_forces(model: str, sensordata: FilteredData, vhlstates: STMStates, 
     # Axle Force calculation
     # similar to Farroni T.R.I.C.K.‐Tire/Road Interaction Characterization & Knowledge
     time_s = sensordata.gen_data.time
-    wheel_force_fl_n = calc_wheel_force_from_torque(
-        sensordata.gen_data.t_m_fl_nm,
-        sensordata.gen_data.omega_wheel_fl_radps,
-        time_s,
-        vhlparams.gear_ratio,
-        vhlparams.wheel_inertia_kgm2,
-        vhlstates.radius_dyn_front_m,
-    )
-    wheel_force_fr_n = calc_wheel_force_from_torque(
-        sensordata.gen_data.t_m_fr_nm,
-        sensordata.gen_data.omega_wheel_fr_radps,
-        time_s,
-        vhlparams.gear_ratio,
-        vhlparams.wheel_inertia_kgm2,
-        vhlstates.radius_dyn_front_m,
-    )
-    wheel_force_rl_n = calc_wheel_force_from_torque(
-        sensordata.gen_data.t_m_rl_nm,
-        sensordata.gen_data.omega_wheel_rl_radps,
-        time_s,
-        vhlparams.gear_ratio,
-        vhlparams.wheel_inertia_kgm2,
-        vhlstates.radius_dyn_rear_m,
-    )
-    wheel_force_rr_n = calc_wheel_force_from_torque(
-        sensordata.gen_data.t_m_rr_nm,
-        sensordata.gen_data.omega_wheel_rr_radps,
-        time_s,
-        vhlparams.gear_ratio,
-        vhlparams.wheel_inertia_kgm2,
-        vhlstates.radius_dyn_rear_m,
-    )
+    if longitudinal_force_mode == "wheel_dynamics":
+        wheel_force_fl_n = calc_wheel_force_from_torque(
+            sensordata.gen_data.t_m_fl_nm,
+            sensordata.gen_data.omega_wheel_fl_radps,
+            time_s,
+            vhlparams.gear_ratio,
+            vhlparams.wheel_inertia_kgm2,
+            vhlstates.radius_dyn_front_m,
+        )
+        wheel_force_fr_n = calc_wheel_force_from_torque(
+            sensordata.gen_data.t_m_fr_nm,
+            sensordata.gen_data.omega_wheel_fr_radps,
+            time_s,
+            vhlparams.gear_ratio,
+            vhlparams.wheel_inertia_kgm2,
+            vhlstates.radius_dyn_front_m,
+        )
+        wheel_force_rl_n = calc_wheel_force_from_torque(
+            sensordata.gen_data.t_m_rl_nm,
+            sensordata.gen_data.omega_wheel_rl_radps,
+            time_s,
+            vhlparams.gear_ratio,
+            vhlparams.wheel_inertia_kgm2,
+            vhlstates.radius_dyn_rear_m,
+        )
+        wheel_force_rr_n = calc_wheel_force_from_torque(
+            sensordata.gen_data.t_m_rr_nm,
+            sensordata.gen_data.omega_wheel_rr_radps,
+            time_s,
+            vhlparams.gear_ratio,
+            vhlparams.wheel_inertia_kgm2,
+            vhlstates.radius_dyn_rear_m,
+        )
+    elif longitudinal_force_mode == "ideal_torque":
+        wheel_force_fl_n = calc_wheel_force_from_ideal_torque(
+            sensordata.gen_data.t_m_fl_nm, vhlparams.gear_ratio, vhlstates.radius_dyn_front_m
+        )
+        wheel_force_fr_n = calc_wheel_force_from_ideal_torque(
+            sensordata.gen_data.t_m_fr_nm, vhlparams.gear_ratio, vhlstates.radius_dyn_front_m
+        )
+        wheel_force_rl_n = calc_wheel_force_from_ideal_torque(
+            sensordata.gen_data.t_m_rl_nm, vhlparams.gear_ratio, vhlstates.radius_dyn_rear_m
+        )
+        wheel_force_rr_n = calc_wheel_force_from_ideal_torque(
+            sensordata.gen_data.t_m_rr_nm, vhlparams.gear_ratio, vhlstates.radius_dyn_rear_m
+        )
+    else:
+        raise ValueError(
+            "Unknown longitudinal force mode: "
+            f"{longitudinal_force_mode}. Expected 'wheel_dynamics' or 'ideal_torque'."
+        )
     stm_forces.wheel_fl.force_x_n = wheel_force_fl_n
     stm_forces.wheel_fr.force_x_n = wheel_force_fr_n
     stm_forces.wheel_rl.force_x_n = wheel_force_rl_n

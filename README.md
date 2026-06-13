@@ -6,7 +6,7 @@ The library provides:
 
 - dataclasses in `data_types/`
 - tire state, force, filtering, fitting, and plotting utilities in `src/utils/` and `src/param_fitting/`
-- AMZ MATLAB data mapping and fitting helpers in `src/amz_pipeline.py`
+- AMZ MATLAB and ROS 2 MCAP data mapping plus fitting helpers in `src/amz_pipeline.py`
 
 It intentionally does not provide top-level main scripts, bundled input data, bundled output data, or default setup TOMLs. Callers must pass explicit config, vehicle parameter, input, and output paths.
 
@@ -15,6 +15,7 @@ It intentionally does not provide top-level main scripts, bundled input data, bu
 `src.amz_pipeline` exposes the reusable AMZ pipeline pieces used by `autonomous_2026`:
 
 - `build_filtered_data(data_file, conf, vhl_params)` maps an AMZ `*_data.mat` file into the estimator dataclasses.
+- `build_filtered_data_from_rosbag(data_file, conf, vhl_params, ...)` maps a ROS 2 MCAP bag into the same dataclasses. It autodetects or accepts explicit velocity, torque, and steering topics. Because current bags do not contain wheel-speed feedback, it uses synthesized rolling wheel speeds for lateral state calculation, ideal torque-to-force conversion for `Fx`, and rejects longitudinal tire fitting.
 - `fit_tire_parameters(conf, sensordata, vhl_params=None)` fits the configured tire model. By default it fits only `front_axle_y` and `rear_axle_y`; set `conf.fit_longitudinal = True` to also fit the four wheel longitudinal targets.
 - `plot_lateral_estimation(...)` and `plot_longitudinal_estimation(...)` provide optional diagnostics.
 

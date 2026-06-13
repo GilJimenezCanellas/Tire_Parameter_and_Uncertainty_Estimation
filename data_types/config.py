@@ -54,3 +54,4 @@ class Config():
     enable_logging: bool
     clean_plots: bool
     fit_longitudinal: bool = False
+    longitudinal_force_mode: str = "wheel_dynamics"

@@ -7,8 +7,9 @@ are owned by the integrating repository.
 
 from __future__ import annotations
 
-from dataclasses import fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
+from typing import Any
 
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -50,6 +51,39 @@ FIT_TARGETS = LONGITUDINAL_FIT_TARGETS + LATERAL_FIT_TARGETS
 BALANCE_TAIL_QUANTILE = 0.9
 BALANCE_TARGET_POINTS_PER_REGION = 250
 BALANCE_MAX_REGIONS = 12
+
+
+@dataclass
+class RosbagSignalSeries:
+    """Time-aligned scalar signals extracted from one ROS bag topic."""
+    time_s: np.ndarray
+    values: dict[str, np.ndarray]
+
+
+ROSBAG_TOPIC_CANDIDATES = {
+    "velocity": (
+        "/vcu/nera/velocity_estimation",
+        "/vcu_msgs/velocity_estimation",
+        "/velocity_estimation",
+    ),
+    "torque": (
+        "/vcu/nera/torque_data",
+        "/vcu_msgs/torque_data",
+        "/torque_data",
+    ),
+    "steering": (
+        "/vcu/nera/steering_feedback",
+        "/vcu_msgs/steering_feedback",
+        "/con/nera/car_command",
+        "/car_command",
+    ),
+}
+
+ROSBAG_TYPE_SUFFIXES = {
+    "velocity": ("/VelocityEstimation", "/State", "/Odometry"),
+    "torque": ("/TorqueData",),
+    "steering": ("/DoubleStamped", "/CarCommand", "/FourWheelCarCommand", "/ReferenceState"),
+}
 
 
 def selected_fit_targets(fit_longitudinal: bool = False) -> list[tuple[str, str]]:
@@ -430,6 +464,430 @@ def plot_longitudinal_estimation(sensordata: FilteredData, vhl_states, vhl_force
     ax.grid(True, alpha=0.3)
     ax.legend()
 
+
+def _first_existing_attr(obj: Any, names: tuple[str, ...]):
+    for name in names:
+        if hasattr(obj, name):
+            return getattr(obj, name)
+    return None
+
+
+def _first_numeric(value) -> float:
+    if value is None:
+        raise ValueError("Missing numeric value")
+    if isinstance(value, (list, tuple)):
+        if not value:
+            raise ValueError("Empty numeric sequence")
+        return float(value[0])
+    try:
+        if len(value) == 0:
+            raise ValueError("Empty numeric sequence")
+        return float(value[0])
+    except TypeError:
+        return float(value)
+
+
+def _message_time_s(msg, fallback_timestamp_ns: int) -> float:
+    header = getattr(msg, "header", None)
+    stamp = getattr(header, "stamp", None)
+    if stamp is not None:
+        sec = float(getattr(stamp, "sec", 0.0))
+        nanosec = float(getattr(stamp, "nanosec", 0.0))
+        if sec != 0.0 or nanosec != 0.0:
+            return sec + nanosec * 1.0e-9
+    return float(fallback_timestamp_ns) * 1.0e-9
+
+
+def _median_sample_time_s(time_s: np.ndarray) -> float:
+    time_s = np.asarray(time_s, dtype=float).ravel()
+    if time_s.size < 2:
+        raise ValueError("At least two samples are required to determine sampling time.")
+    diffs = np.diff(time_s)
+    diffs = diffs[np.isfinite(diffs) & (diffs > 0.0)]
+    if diffs.size == 0:
+        raise ValueError("Time vector does not contain positive finite sample intervals.")
+    return float(np.median(diffs))
+
+
+def _odd_window_length(candidate: int, signal_size: int, poly_order: int) -> int:
+    if signal_size <= poly_order + 1:
+        return signal_size
+    window_length = max(int(candidate), poly_order + 2, 3)
+    if window_length % 2 == 0:
+        window_length += 1
+    max_window = signal_size if signal_size % 2 == 1 else signal_size - 1
+    window_length = min(window_length, max_window)
+    if window_length <= poly_order:
+        window_length = poly_order + 1
+        if window_length % 2 == 0:
+            window_length += 1
+    return max(window_length, 3)
+
+
+def _filter_settings_for_time(filter_type: str, settings: dict, time_s: np.ndarray,
+                              nominal_sampling_freq_hz: float, signal_size: int) -> dict:
+    scaled_settings = dict(settings)
+    dt_s = _median_sample_time_s(time_s)
+    actual_sampling_freq_hz = 1.0 / dt_s
+    if filter_type == "savgol" and "window_length" in scaled_settings:
+        nominal_sampling_freq_hz = float(nominal_sampling_freq_hz)
+        configured_window_length = int(scaled_settings["window_length"])
+        if nominal_sampling_freq_hz > 0.0:
+            window_duration_s = configured_window_length / nominal_sampling_freq_hz
+            window_length = int(round(window_duration_s * actual_sampling_freq_hz))
+        else:
+            window_length = configured_window_length
+        scaled_settings["window_length"] = _odd_window_length(
+            window_length,
+            signal_size,
+            int(scaled_settings.get("order", 0)),
+        )
+    elif filter_type == "butterworth":
+        scaled_settings["sampling_freq"] = actual_sampling_freq_hz
+    return scaled_settings
+
+
+def _filter_data_for_time(filter_type: str, settings: dict, data, time_s: np.ndarray, conf):
+    signal_size = len(np.asarray(time_s).ravel())
+    if signal_size < 3:
+        return data
+    if filter_type == "savgol" and signal_size <= int(settings.get("order", 0)) + 1:
+        return data
+    scaled_settings = _filter_settings_for_time(
+        filter_type,
+        settings,
+        time_s,
+        getattr(conf, "sampling_freq_hz", 0.0),
+        signal_size,
+    )
+    return fitler_data(filter_type, scaled_settings, data)
+
+
+def _copy_masked_sections(data_cor: CorData, data_imu: ImuData, data_gen: GenData, mask: np.ndarray) -> FilteredData:
+    filtered = FilteredData()
+    for section_name, source in (
+        ("cor_data", data_cor),
+        ("imu_data", data_imu),
+        ("gen_data", data_gen),
+    ):
+        destination = getattr(filtered, section_name)
+        for field in fields(source):
+            values = np.asarray(getattr(source, field.name))
+            if values.ndim == 1 and values.shape[0] == mask.shape[0]:
+                setattr(destination, field.name, jnp.array(values[mask]))
+    return filtered
+
+
+def _required_input_matrix(data_cor: CorData, data_imu: ImuData, data_gen: GenData,
+                           include_motor_speeds: bool) -> np.ndarray:
+    required_signals = [
+        np.asarray(data_cor.time),
+        np.asarray(data_cor.vel_cog_x_mps),
+        np.asarray(data_cor.vel_cog_y_mps),
+        np.asarray(data_imu.acc_cog_x_mps2),
+        np.asarray(data_imu.acc_cog_y_mps2),
+        np.asarray(data_imu.yaw_rate_radps),
+        np.asarray(data_gen.delta_f_rad),
+        np.asarray(data_gen.omega_wheel_fl_radps),
+        np.asarray(data_gen.omega_wheel_fr_radps),
+        np.asarray(data_gen.omega_wheel_rl_radps),
+        np.asarray(data_gen.omega_wheel_rr_radps),
+        np.asarray(data_gen.t_m_fl_nm),
+        np.asarray(data_gen.t_m_fr_nm),
+        np.asarray(data_gen.t_m_rl_nm),
+        np.asarray(data_gen.t_m_rr_nm),
+    ]
+    if include_motor_speeds:
+        required_signals.extend(
+            [
+                np.asarray(data_gen.omega_m_fl_radps),
+                np.asarray(data_gen.omega_m_fr_radps),
+                np.asarray(data_gen.omega_m_rl_radps),
+                np.asarray(data_gen.omega_m_rr_radps),
+            ]
+        )
+    return np.column_stack(required_signals)
+
+
+def _finalize_filtered_sections(data_cor: CorData, data_imu: ImuData, data_gen: GenData, conf,
+                                *, include_motor_speeds: bool = True,
+                                align_signals: bool = True,
+                                filter_fresh_measurements: bool = True) -> FilteredData:
+    data_cor = vel_offset_correction(conf.lambda_v, data_cor)
+    data_imu = imu_offset_correction(
+        conf.ax_median,
+        conf.ay_median,
+        conf.lambda_ax,
+        conf.lambda_ay,
+        conf.yaw_rate_off,
+        conf.az_off,
+        data_imu,
+    )
+    data_gen = _filter_data_for_time(conf.filter_gen, conf.settings_gen, data_gen, data_gen.time, conf)
+    data_cor = _filter_data_for_time(conf.filter_cor, conf.settings_cor, data_cor, data_cor.time, conf)
+    data_imu = _filter_data_for_time(conf.filter_imu, conf.settings_imu, data_imu, data_imu.time, conf)
+    if conf.imu_acc_z_fix:
+        data_imu.acc_cog_z_mps2 = jnp.ones_like(data_imu.acc_cog_z_mps2) * 9.81
+
+    finite_mask = np.isfinite(
+        _required_input_matrix(data_cor, data_imu, data_gen, include_motor_speeds)
+    ).all(axis=1)
+    speed_mask = np.asarray(data_cor.vel_cog_x_mps) > conf.low_speed_filter_mps
+    filtered = _copy_masked_sections(data_cor, data_imu, data_gen, finite_mask & speed_mask)
+
+    validate_required_sensor_signals(
+        filtered,
+        include_motor_speeds=include_motor_speeds,
+        include_force_inputs=True,
+    )
+
+    if align_signals:
+        applied_shifts = align_filtered_data_signals(filtered)
+        if applied_shifts:
+            print("-" * 80)
+            print("Signal alignment summary")
+            for description, shift_samples, shift_seconds in applied_shifts:
+                print(f"{description:<60} shift={shift_samples:+4d} samples ({shift_seconds:+.4f} s)")
+
+    if filter_fresh_measurements:
+        filtered, freshness_summary = keep_only_fresh_measurement_rows(filtered)
+        if freshness_summary:
+            print("-" * 80)
+            print("Fresh-measurement row filtering")
+            print(
+                f"Kept {freshness_summary['rows_kept_total']} rows, "
+                f"removed {freshness_summary['rows_removed_total']} rows."
+            )
+            for signal_name, removed_count in freshness_summary.items():
+                if signal_name.startswith("rows_"):
+                    continue
+                print(f"{signal_name:<60} repeated_rows={removed_count}")
+
+    validate_required_sensor_signals(
+        filtered,
+        include_motor_speeds=include_motor_speeds,
+        include_force_inputs=True,
+    )
+    return filtered
+
+
+def _detect_rosbag_storage_id(uri: Path, storage_id: str | None) -> str:
+    if storage_id:
+        return storage_id
+    if uri.is_file():
+        if uri.suffix == ".mcap":
+            return "mcap"
+        if uri.suffix == ".db3":
+            return "sqlite3"
+    if uri.is_dir():
+        for child in uri.iterdir():
+            if child.suffix == ".mcap":
+                return "mcap"
+            if child.suffix == ".db3":
+                return "sqlite3"
+    return ""
+
+
+def _resolve_rosbag_topics(topic_types: dict[str, str], topic_overrides: dict[str, str | None]) -> dict[str, str]:
+    resolved = {}
+    for role in ("velocity", "torque", "steering"):
+        override = topic_overrides.get(role)
+        if override:
+            if override not in topic_types:
+                available = ", ".join(sorted(topic_types))
+                raise ValueError(f"Requested {role} topic '{override}' is not in the bag. Available topics: {available}")
+            resolved[role] = override
+            continue
+
+        for candidate in ROSBAG_TOPIC_CANDIDATES[role]:
+            if candidate in topic_types:
+                resolved[role] = candidate
+                break
+        if role in resolved:
+            continue
+
+        scored_topics = []
+        for topic, type_name in topic_types.items():
+            score = 0
+            for suffix_index, suffix in enumerate(ROSBAG_TYPE_SUFFIXES[role]):
+                if type_name.endswith(suffix):
+                    score = 100 - suffix_index * 10
+                    break
+            if score == 0:
+                continue
+            topic_lower = topic.lower()
+            if role in topic_lower:
+                score += 6
+            if "steer" in topic_lower and role == "steering":
+                score += 8
+            if "command" in topic_lower and role == "steering":
+                score += 4
+            if "reference" in topic_lower and role == "steering":
+                score += 2
+            if "torque" in topic_lower and role == "torque":
+                score += 8
+            if "velocity" in topic_lower and role == "velocity":
+                score += 8
+            scored_topics.append((score, topic))
+
+        if not scored_topics:
+            available = "\n".join(f"{topic}: {type_name}" for topic, type_name in sorted(topic_types.items()))
+            raise ValueError(f"Could not autodetect a {role} topic in the bag. Available topics:\n{available}")
+        resolved[role] = max(scored_topics)[1]
+    return resolved
+
+
+def _extract_rosbag_values(role: str, type_name: str, msg) -> dict[str, float] | None:
+    if role == "velocity":
+        velocity = _first_existing_attr(msg, ("velocities", "vel"))
+        acceleration = _first_existing_attr(msg, ("accelerations", "acc"))
+        if velocity is not None:
+            values = {
+                "vel_x": float(velocity.x),
+                "vel_y": float(velocity.y),
+                "yaw_rate": float(velocity.theta),
+            }
+            if acceleration is not None:
+                values["acc_x"] = float(acceleration.x)
+                values["acc_y"] = float(acceleration.y)
+            return values
+        if type_name.endswith("/State"):
+            return {
+                "vel_x": float(msg.vx),
+                "vel_y": float(msg.vy),
+                "yaw_rate": float(msg.dyaw),
+            }
+        if type_name == "nav_msgs/msg/Odometry":
+            return {
+                "vel_x": float(msg.twist.twist.linear.x),
+                "vel_y": float(msg.twist.twist.linear.y),
+                "yaw_rate": float(msg.twist.twist.angular.z),
+            }
+
+    if role == "torque" and type_name.endswith("/TorqueData"):
+        return {
+            "feedback_t_m_fl": float(msg.feedback_t_m_fl),
+            "feedback_t_m_fr": float(msg.feedback_t_m_fr),
+            "feedback_t_m_rl": float(msg.feedback_t_m_rl),
+            "feedback_t_m_rr": float(msg.feedback_t_m_rr),
+            "reference_t_m_fl": float(msg.reference_t_m_fl),
+            "reference_t_m_fr": float(msg.reference_t_m_fr),
+            "reference_t_m_rl": float(msg.reference_t_m_rl),
+            "reference_t_m_rr": float(msg.reference_t_m_rr),
+        }
+
+    if role == "steering":
+        if hasattr(msg, "data"):
+            return {"steer": float(msg.data)}
+        steering_value = _first_existing_attr(msg, ("steering_angle", "delta_s"))
+        if steering_value is not None:
+            return {"steer": _first_numeric(steering_value)}
+
+    return None
+
+
+def _series_from_rosbag_samples(samples: list[tuple[float, dict[str, float]]], role: str) -> RosbagSignalSeries:
+    if not samples:
+        raise ValueError(f"No usable {role} samples were found in the bag.")
+    rows_by_time = {}
+    keys = set()
+    for time_s, values in samples:
+        if not np.isfinite(time_s):
+            continue
+        rows_by_time[float(time_s)] = values
+        keys.update(values)
+    if not rows_by_time:
+        raise ValueError(f"No finite {role} timestamps were found in the bag.")
+    time_s = np.array(sorted(rows_by_time), dtype=float)
+    series_values = {
+        key: np.array([rows_by_time[time].get(key, np.nan) for time in time_s], dtype=float)
+        for key in sorted(keys)
+    }
+    finite_mask = np.isfinite(time_s)
+    for values in series_values.values():
+        finite_mask &= np.isfinite(values)
+    time_s = time_s[finite_mask]
+    series_values = {key: values[finite_mask] for key, values in series_values.items()}
+    if time_s.size < 2:
+        raise ValueError(f"At least two finite {role} samples are required.")
+    return RosbagSignalSeries(time_s=time_s, values=series_values)
+
+
+def _read_rosbag_signal_series(data_file: Path, topic_overrides: dict[str, str | None],
+                               storage_id: str | None = None) -> tuple[dict[str, RosbagSignalSeries], dict[str, str]]:
+    try:
+        import rosbag2_py
+        from rclpy.serialization import deserialize_message
+        from rosidl_runtime_py.utilities import get_message
+    except ImportError as exc:
+        raise ImportError(
+            "ROS bag input requires ROS 2 Python packages. Source the ROS environment "
+            "and make sure rosbag2_py, rclpy, and rosidl_runtime_py are importable."
+        ) from exc
+
+    reader = rosbag2_py.SequentialReader()
+    storage_options = rosbag2_py.StorageOptions(
+        uri=str(data_file),
+        storage_id=_detect_rosbag_storage_id(data_file, storage_id),
+    )
+    converter_options = rosbag2_py.ConverterOptions(
+        input_serialization_format="cdr",
+        output_serialization_format="cdr",
+    )
+    reader.open(storage_options, converter_options)
+    topic_types = {topic.name: topic.type for topic in reader.get_all_topics_and_types()}
+    resolved_topics = _resolve_rosbag_topics(topic_types, topic_overrides)
+    role_by_topic = {topic: role for role, topic in resolved_topics.items()}
+    msg_classes = {
+        topic: get_message(topic_types[topic])
+        for topic in role_by_topic
+    }
+
+    samples_by_role = {role: [] for role in resolved_topics}
+    while reader.has_next():
+        topic, serialized_data, timestamp_ns = reader.read_next()
+        role = role_by_topic.get(topic)
+        if role is None:
+            continue
+        msg = deserialize_message(serialized_data, msg_classes[topic])
+        values = _extract_rosbag_values(role, topic_types[topic], msg)
+        if values is None:
+            continue
+        samples_by_role[role].append((_message_time_s(msg, timestamp_ns), values))
+
+    return (
+        {role: _series_from_rosbag_samples(samples, role) for role, samples in samples_by_role.items()},
+        resolved_topics,
+    )
+
+
+def _interpolate_series(series: RosbagSignalSeries, target_time_s: np.ndarray,
+                        field_names: tuple[str, ...], label: str) -> dict[str, np.ndarray]:
+    values = {}
+    for field_name in field_names:
+        if field_name not in series.values:
+            raise ValueError(f"Required field '{field_name}' was not found in {label} samples.")
+        values[field_name] = np.interp(target_time_s, series.time_s, series.values[field_name])
+    return values
+
+
+def _choose_rosbag_torque_source(torque_values: dict[str, np.ndarray], requested_source: str) -> str:
+    if requested_source not in {"auto", "feedback", "reference"}:
+        raise ValueError("rosbag torque source must be 'auto', 'feedback', or 'reference'.")
+    if requested_source != "auto":
+        return requested_source
+
+    feedback_keys = ("feedback_t_m_fl", "feedback_t_m_fr", "feedback_t_m_rl", "feedback_t_m_rr")
+    reference_keys = ("reference_t_m_fl", "reference_t_m_fr", "reference_t_m_rl", "reference_t_m_rr")
+    feedback_has_signal = any(np.any(np.abs(torque_values[key]) > 1.0e-9) for key in feedback_keys)
+    reference_has_signal = any(np.any(np.abs(torque_values[key]) > 1.0e-9) for key in reference_keys)
+    if feedback_has_signal:
+        return "feedback"
+    if reference_has_signal:
+        return "reference"
+    return "feedback"
+
+
 def mat_array(mat_data: dict, *names: str, default: np.ndarray | None = None) -> np.ndarray:
     """Return the first available signal as a flat float array."""
     for name in names:
@@ -536,110 +994,174 @@ def build_filtered_data(data_file: Path, conf, vhl_params) -> FilteredData:
         gear=jnp.zeros(size),
     )
 
-    data_cor = vel_offset_correction(conf.lambda_v, data_cor)
-    data_imu = imu_offset_correction(
-        conf.ax_median,
-        conf.ay_median,
-        conf.lambda_ax,
-        conf.lambda_ay,
-        conf.yaw_rate_off,
-        conf.az_off,
+    return _finalize_filtered_sections(
+        data_cor,
         data_imu,
-    )
-    data_gen = fitler_data(conf.filter_gen, conf.settings_gen, data_gen)
-    data_cor = fitler_data(conf.filter_cor, conf.settings_cor, data_cor)
-    data_imu = fitler_data(conf.filter_imu, conf.settings_imu, data_imu)
-    if conf.imu_acc_z_fix:
-        data_imu.acc_cog_z_mps2 = jnp.ones_like(data_imu.acc_cog_z_mps2) * 9.81
-
-    finite_mask = np.isfinite(
-        np.column_stack(
-            [
-                np.asarray(data_cor.time),
-                np.asarray(data_cor.vel_cog_x_mps),
-                np.asarray(data_cor.vel_cog_y_mps),
-                np.asarray(data_imu.acc_cog_x_mps2),
-                np.asarray(data_imu.acc_cog_y_mps2),
-                np.asarray(data_imu.yaw_rate_radps),
-                np.asarray(data_gen.delta_f_rad),
-                np.asarray(data_gen.omega_wheel_fl_radps),
-                np.asarray(data_gen.omega_wheel_fr_radps),
-                np.asarray(data_gen.omega_wheel_rl_radps),
-                np.asarray(data_gen.omega_wheel_rr_radps),
-                np.asarray(data_gen.omega_m_fl_radps),
-                np.asarray(data_gen.omega_m_fr_radps),
-                np.asarray(data_gen.omega_m_rl_radps),
-                np.asarray(data_gen.omega_m_rr_radps),
-                np.asarray(data_gen.t_m_fl_nm),
-                np.asarray(data_gen.t_m_fr_nm),
-                np.asarray(data_gen.t_m_rl_nm),
-                np.asarray(data_gen.t_m_rr_nm),
-            ]
-        )
-    ).all(axis=1)
-    speed_mask = np.asarray(data_cor.vel_cog_x_mps) > conf.low_speed_filter_mps
-    mask = finite_mask & speed_mask
-
-    filtered = FilteredData()
-    filtered.cor_data.time = jnp.array(np.asarray(data_cor.time)[mask])
-    filtered.cor_data.vel_cog_x_mps = jnp.array(np.asarray(data_cor.vel_cog_x_mps)[mask])
-    filtered.cor_data.vel_cog_y_mps = jnp.array(np.asarray(data_cor.vel_cog_y_mps)[mask])
-
-    filtered.imu_data.time = jnp.array(np.asarray(data_imu.time)[mask])
-    filtered.imu_data.acc_cog_x_mps2 = jnp.array(np.asarray(data_imu.acc_cog_x_mps2)[mask])
-    filtered.imu_data.acc_cog_y_mps2 = jnp.array(np.asarray(data_imu.acc_cog_y_mps2)[mask])
-    filtered.imu_data.acc_cog_z_mps2 = jnp.array(np.asarray(data_imu.acc_cog_z_mps2)[mask])
-    filtered.imu_data.yaw_rate_radps = jnp.array(np.asarray(data_imu.yaw_rate_radps)[mask])
-
-    filtered.gen_data.time = jnp.array(np.asarray(data_gen.time)[mask])
-    filtered.gen_data.delta_f_rad = jnp.array(np.asarray(data_gen.delta_f_rad)[mask])
-    filtered.gen_data.omega_wheel_fl_radps = jnp.array(np.asarray(data_gen.omega_wheel_fl_radps)[mask])
-    filtered.gen_data.omega_wheel_fr_radps = jnp.array(np.asarray(data_gen.omega_wheel_fr_radps)[mask])
-    filtered.gen_data.omega_wheel_rl_radps = jnp.array(np.asarray(data_gen.omega_wheel_rl_radps)[mask])
-    filtered.gen_data.omega_wheel_rr_radps = jnp.array(np.asarray(data_gen.omega_wheel_rr_radps)[mask])
-    filtered.gen_data.omega_m_fl_radps = jnp.array(np.asarray(data_gen.omega_m_fl_radps)[mask])
-    filtered.gen_data.omega_m_fr_radps = jnp.array(np.asarray(data_gen.omega_m_fr_radps)[mask])
-    filtered.gen_data.omega_m_rl_radps = jnp.array(np.asarray(data_gen.omega_m_rl_radps)[mask])
-    filtered.gen_data.omega_m_rr_radps = jnp.array(np.asarray(data_gen.omega_m_rr_radps)[mask])
-    filtered.gen_data.t_m_fl_nm = jnp.array(np.asarray(data_gen.t_m_fl_nm)[mask])
-    filtered.gen_data.t_m_fr_nm = jnp.array(np.asarray(data_gen.t_m_fr_nm)[mask])
-    filtered.gen_data.t_m_rl_nm = jnp.array(np.asarray(data_gen.t_m_rl_nm)[mask])
-    filtered.gen_data.t_m_rr_nm = jnp.array(np.asarray(data_gen.t_m_rr_nm)[mask])
-    filtered.gen_data.gear = jnp.array(np.asarray(data_gen.gear)[mask])
-
-    validate_required_sensor_signals(
-        filtered,
+        data_gen,
+        conf,
         include_motor_speeds=True,
-        include_force_inputs=True,
+        align_signals=True,
+        filter_fresh_measurements=True,
     )
 
-    applied_shifts = align_filtered_data_signals(filtered)
-    if applied_shifts:
-        print("-" * 80)
-        print("Signal alignment summary")
-        for description, shift_samples, shift_seconds in applied_shifts:
-            print(f"{description:<60} shift={shift_samples:+4d} samples ({shift_seconds:+.4f} s)")
 
-    filtered, freshness_summary = keep_only_fresh_measurement_rows(filtered)
-    if freshness_summary:
-        print("-" * 80)
-        print("Fresh-measurement row filtering")
-        print(
-            f"Kept {freshness_summary['rows_kept_total']} rows, "
-            f"removed {freshness_summary['rows_removed_total']} rows."
+def build_filtered_data_from_rosbag(data_file: Path, conf, vhl_params, *,
+                                    velocity_topic: str | None = None,
+                                    torque_topic: str | None = None,
+                                    steering_topic: str | None = None,
+                                    storage_id: str | None = None,
+                                    torque_source: str = "auto") -> FilteredData:
+    """Map AMZ ROS 2 MCAP data into the estimator's filtered sensor dataclass.
+
+    MCAP logs currently do not contain wheel-speed feedback. The builder
+    synthesizes rolling wheel speeds from vehicle velocity only to keep lateral
+    tire-state calculations well-defined; longitudinal tire fitting is rejected
+    because real longitudinal slip is unavailable.
+    """
+    if bool(getattr(conf, "fit_longitudinal", False)):
+        raise ValueError(
+            "Longitudinal tire fitting is not available for ROS bag inputs because "
+            "the bags do not contain wheel-speed feedback."
         )
-        for signal_name, removed_count in freshness_summary.items():
-            if signal_name.startswith("rows_"):
-                continue
-            print(f"{signal_name:<60} repeated_rows={removed_count}")
 
-    validate_required_sensor_signals(
-        filtered,
-        include_motor_speeds=True,
-        include_force_inputs=True,
+    topic_overrides = {
+        "velocity": velocity_topic,
+        "torque": torque_topic,
+        "steering": steering_topic,
+    }
+    series_by_role, resolved_topics = _read_rosbag_signal_series(data_file, topic_overrides, storage_id)
+    setattr(conf, "rosbag_topics", resolved_topics)
+
+    velocity_series = series_by_role["velocity"]
+    torque_series = series_by_role["torque"]
+    steering_series = series_by_role["steering"]
+    overlap_start_s = max(
+        float(velocity_series.time_s[0]),
+        float(torque_series.time_s[0]),
+        float(steering_series.time_s[0]),
+    )
+    overlap_end_s = min(
+        float(velocity_series.time_s[-1]),
+        float(torque_series.time_s[-1]),
+        float(steering_series.time_s[-1]),
+    )
+    if overlap_end_s <= overlap_start_s:
+        raise ValueError("ROS bag topics do not have an overlapping time interval.")
+
+    base_mask = (velocity_series.time_s >= overlap_start_s) & (velocity_series.time_s <= overlap_end_s)
+    base_time_abs_s = velocity_series.time_s[base_mask]
+    if base_time_abs_s.size < 2:
+        dt_s = _median_sample_time_s(velocity_series.time_s)
+        base_time_abs_s = np.arange(overlap_start_s, overlap_end_s + 0.5 * dt_s, dt_s)
+    if base_time_abs_s.size < 2:
+        raise ValueError("ROS bag overlap interval does not contain enough samples.")
+
+    velocity_values = _interpolate_series(
+        velocity_series,
+        base_time_abs_s,
+        ("vel_x", "vel_y", "yaw_rate"),
+        "velocity",
+    )
+    vel_x = velocity_values["vel_x"]
+    vel_y = velocity_values["vel_y"]
+    yaw_rate = velocity_values["yaw_rate"]
+    if "acc_x" in velocity_series.values and "acc_y" in velocity_series.values:
+        acceleration_values = _interpolate_series(
+            velocity_series,
+            base_time_abs_s,
+            ("acc_x", "acc_y"),
+            "velocity",
+        )
+        acc_x = acceleration_values["acc_x"]
+        acc_y = acceleration_values["acc_y"]
+    else:
+        acc_x = np.gradient(vel_x, base_time_abs_s)
+        acc_y = np.gradient(vel_y, base_time_abs_s)
+
+    steering_values = _interpolate_series(steering_series, base_time_abs_s, ("steer",), "steering")
+    steer = steering_values["steer"]
+
+    torque_values = _interpolate_series(
+        torque_series,
+        base_time_abs_s,
+        (
+            "feedback_t_m_fl",
+            "feedback_t_m_fr",
+            "feedback_t_m_rl",
+            "feedback_t_m_rr",
+            "reference_t_m_fl",
+            "reference_t_m_fr",
+            "reference_t_m_rl",
+            "reference_t_m_rr",
+        ),
+        "torque",
+    )
+    selected_torque_source = _choose_rosbag_torque_source(torque_values, torque_source)
+    setattr(conf, "rosbag_torque_source_requested", torque_source)
+    setattr(conf, "rosbag_torque_source_used", selected_torque_source)
+    setattr(conf, "longitudinal_force_mode", "ideal_torque")
+
+    time = base_time_abs_s - base_time_abs_s[0]
+    size = len(time)
+    safe_front_radius_m = max(abs(float(vhl_params.r_tire_unloaded_front_m)), 1.0e-6)
+    safe_rear_radius_m = max(abs(float(vhl_params.r_tire_unloaded_rear_m)), 1.0e-6)
+    safe_gear_ratio = max(abs(float(vhl_params.gear_ratio)), 1.0e-6)
+
+    vel_y_front_mps = vel_y + yaw_rate * vhl_params.l_front_m
+    vel_y_rear_mps = vel_y - yaw_rate * vhl_params.l_rear_m
+    vel_x_front_left_mps = vel_x - yaw_rate * vhl_params.tw_front_m / 2
+    vel_x_front_right_mps = vel_x + yaw_rate * vhl_params.tw_front_m / 2
+    vel_x_rear_left_mps = vel_x - yaw_rate * vhl_params.tw_rear_m / 2
+    vel_x_rear_right_mps = vel_x + yaw_rate * vhl_params.tw_rear_m / 2
+    omega_fl = (
+        np.cos(steer) * vel_x_front_left_mps + np.sin(steer) * vel_y_front_mps
+    ) / safe_front_radius_m
+    omega_fr = (
+        np.cos(steer) * vel_x_front_right_mps + np.sin(steer) * vel_y_front_mps
+    ) / safe_front_radius_m
+    omega_rl = vel_x_rear_left_mps / safe_rear_radius_m
+    omega_rr = vel_x_rear_right_mps / safe_rear_radius_m
+
+    data_cor = CorData(
+        time=jnp.array(time),
+        vel_cog_x_mps=jnp.array(vel_x),
+        vel_cog_y_mps=jnp.array(vel_y),
+    )
+    data_imu = ImuData(
+        time=jnp.array(time),
+        acc_cog_x_mps2=jnp.array(acc_x),
+        acc_cog_y_mps2=jnp.array(acc_y),
+        acc_cog_z_mps2=jnp.ones(size) * 9.81,
+        yaw_rate_radps=jnp.array(yaw_rate),
+    )
+    data_gen = GenData(
+        time=jnp.array(time),
+        delta_f_rad=jnp.array(steer),
+        omega_wheel_fl_radps=jnp.array(omega_fl),
+        omega_wheel_fr_radps=jnp.array(omega_fr),
+        omega_wheel_rl_radps=jnp.array(omega_rl),
+        omega_wheel_rr_radps=jnp.array(omega_rr),
+        omega_m_fl_radps=jnp.array(omega_fl * safe_gear_ratio),
+        omega_m_fr_radps=jnp.array(omega_fr * safe_gear_ratio),
+        omega_m_rl_radps=jnp.array(omega_rl * safe_gear_ratio),
+        omega_m_rr_radps=jnp.array(omega_rr * safe_gear_ratio),
+        t_m_fl_nm=jnp.array(torque_values[f"{selected_torque_source}_t_m_fl"]),
+        t_m_fr_nm=jnp.array(torque_values[f"{selected_torque_source}_t_m_fr"]),
+        t_m_rl_nm=jnp.array(torque_values[f"{selected_torque_source}_t_m_rl"]),
+        t_m_rr_nm=jnp.array(torque_values[f"{selected_torque_source}_t_m_rr"]),
+        gear=jnp.zeros(size),
     )
 
-    return filtered
+    return _finalize_filtered_sections(
+        data_cor,
+        data_imu,
+        data_gen,
+        conf,
+        include_motor_speeds=False,
+        align_signals=False,
+        filter_fresh_measurements=False,
+    )
+
 
 def fit_tire_parameters(conf, sensordata, vhl_params=None):
     """Fit tire parameters for already loaded sensor data.
@@ -655,7 +1177,13 @@ def fit_tire_parameters(conf, sensordata, vhl_params=None):
         vhl_params = load_params(str(conf.vehicle_parameter_names))
 
     vhl_states = calc_vhl_states(sensordata, vhl_params)
-    vhl_forces = calc_vhl_forces(conf.model, sensordata, vhl_states, vhl_params)
+    vhl_forces = calc_vhl_forces(
+        conf.model,
+        sensordata,
+        vhl_states,
+        vhl_params,
+        longitudinal_force_mode=getattr(conf, "longitudinal_force_mode", "wheel_dynamics"),
+    )
 
     # Low pass filtering
     force_filter_type = 'savgol' # or 'butterworth', 'moving_average', 'gaussian'
@@ -671,7 +1199,17 @@ def fit_tire_parameters(conf, sensordata, vhl_params=None):
     for field in fields(vhl_forces):
         sub_dataclass = getattr(vhl_forces, field.name)
         if is_dataclass(sub_dataclass):
-            setattr(vhl_forces, field.name, fitler_data(force_filter_type, force_filter_settings, sub_dataclass))
+            setattr(
+                vhl_forces,
+                field.name,
+                _filter_data_for_time(
+                    force_filter_type,
+                    force_filter_settings,
+                    sub_dataclass,
+                    sensordata.gen_data.time,
+                    conf,
+                ),
+            )
 
     delta_dot = jnp.gradient(sensordata.gen_data.delta_f_rad, sensordata.gen_data.time)
 
