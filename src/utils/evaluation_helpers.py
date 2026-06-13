@@ -27,6 +27,23 @@ def _to_numpy(values):
     return np.asarray(jnp.asarray(values), dtype=float).ravel()
 
 
+def _selected_targets(include_longitudinal: bool = True):
+    '''Return plotting/evaluation target metadata for the requested fit scope.'''
+    return (LONGITUDINAL_TARGETS if include_longitudinal else []) + LATERAL_TARGETS
+
+
+def _make_subplot_grid(num_targets: int, column_width: float = 10.0, row_height: float = 3.4):
+    '''Create a compact 2-column grid and hide unused axes.'''
+    num_targets = max(int(num_targets), 1)
+    num_cols = 2 if num_targets > 1 else 1
+    num_rows = int(np.ceil(num_targets / num_cols))
+    fig, axes = plt.subplots(num_rows, num_cols, figsize=(column_width, max(row_height, row_height * num_rows)))
+    axes = np.atleast_1d(axes).ravel()
+    for axis in axes[num_targets:]:
+        axis.set_visible(False)
+    return fig, axes
+
+
 def _extract_sigma_values(sample_entry):
     '''Extract slip values from either raw arrays or stored fit-sample dictionaries.'''
     if isinstance(sample_entry, dict):
@@ -93,36 +110,35 @@ def build_fit_excitation_samples(vehicle_states: STMStates):
     return fit_excitation_samples
 
 
-def plot_excitation_histograms(excitation_source, num_bins: int = 30):
+def plot_excitation_histograms(excitation_source, num_bins: int = 30, include_longitudinal: bool = True):
     '''Plot slip-ratio and slip-angle excitation histograms used in tire fitting.'''
-    column_width = 10
-    fig, axes = plt.subplots(3, 2, figsize=(column_width, column_width))
-    axes = axes.flatten()
-
     if isinstance(excitation_source, STMStates):
         fit_excitation_samples = build_fit_excitation_samples(excitation_source)
     else:
         fit_excitation_samples = excitation_source
 
-    longitudinal_values = [
-        _extract_sigma_values(fit_excitation_samples.get(param_key, np.array([], dtype=float)))
-        for _, param_key, _, _ in LONGITUDINAL_TARGETS
-    ]
     lateral_values = [
         _extract_sigma_values(fit_excitation_samples.get(param_key, np.array([], dtype=float)))
         for _, param_key, _, _ in LATERAL_TARGETS
     ]
-    longitudinal_bins = _build_symmetric_bins(longitudinal_values, num_bins)
     lateral_bins = _build_symmetric_bins(lateral_values, num_bins)
 
-    plot_targets = [
-        (param_key, title, color, 'x', longitudinal_bins)
-        for _, param_key, title, color in LONGITUDINAL_TARGETS
-    ]
+    plot_targets = []
+    if include_longitudinal:
+        longitudinal_values = [
+            _extract_sigma_values(fit_excitation_samples.get(param_key, np.array([], dtype=float)))
+            for _, param_key, _, _ in LONGITUDINAL_TARGETS
+        ]
+        longitudinal_bins = _build_symmetric_bins(longitudinal_values, num_bins)
+        plot_targets.extend(
+            (param_key, title, color, 'x', longitudinal_bins)
+            for _, param_key, title, color in LONGITUDINAL_TARGETS
+        )
     plot_targets += [
         (param_key, title, color, 'y', lateral_bins)
         for _, param_key, title, color in LATERAL_TARGETS
     ]
+    fig, axes = _make_subplot_grid(len(plot_targets), column_width=10.0)
 
     for plot_pos, (param_key, title, color, direction, bins) in enumerate(plot_targets):
         sample_entry = fit_excitation_samples.get(param_key, np.array([], dtype=float))
@@ -170,19 +186,21 @@ def plot_excitation_histograms(excitation_source, num_bins: int = 30):
     plt.tight_layout(rect=(0.0, 0.0, 1.0, 0.98))
 
 
-def plot_bell_curves(params: STMTireParams, std_params: STMTireParams, params_min: MFSimpleParams, params_max: MFSimpleParams):
+def plot_bell_curves(params: STMTireParams, std_params: STMTireParams, params_min: MFSimpleParams,
+                     params_max: MFSimpleParams, include_longitudinal: bool = True):
     ''' Plot the parameter distributions as bell curves '''
     if not params:
         print("No parameters to plot.")
         return
     param_names = ['B', 'C', 'D', 'E']
     column_width = 3.5
-    tum_color = {param_key: color for _, param_key, _, color in LONGITUDINAL_TARGETS + LATERAL_TARGETS}
+    plot_targets = _selected_targets(include_longitudinal)
+    tum_color = {param_key: color for _, param_key, _, color in plot_targets}
     fig, axes = plt.subplots(2, 2, figsize=(column_width, column_width), sharex=False)
     axes = axes.flatten()
     used_labels = []
     for i, param_name in enumerate(param_names):
-        for _, key, _, _ in LONGITUDINAL_TARGETS + LATERAL_TARGETS:
+        for _, key, _, _ in plot_targets:
             mean = getattr(params, key).__dict__[param_name]
             std_dev = getattr(std_params, key).__dict__[param_name]
             x = jnp.linspace(params_min.__dict__[param_name],
@@ -267,13 +285,14 @@ def _build_load_regions(load_n, num_regions: int):
 
 def plot_tire_curves(vehicle_states: STMStates, vehicle_forces: STMForces,
                      tire_params_set_svi: STMTireParams, tire_params_set_nelder: STMTireParams,
-                     clean_plots: bool = False, fit_data: dict | None = None):
+                     clean_plots: bool = False, fit_data: dict | None = None,
+                     include_longitudinal: bool = True):
     ''' Plot the resulting tire curves '''
-    column_width = 10
-    fig, ax = plt.subplots(3, 2, figsize=(column_width, column_width))
-    ax = ax.flatten()
-    plot_targets = [(state_key, param_key, title, 'x') for state_key, param_key, title, _ in LONGITUDINAL_TARGETS]
+    plot_targets = []
+    if include_longitudinal:
+        plot_targets.extend((state_key, param_key, title, 'x') for state_key, param_key, title, _ in LONGITUDINAL_TARGETS)
     plot_targets += [(state_key, param_key, title, 'y') for state_key, param_key, title, _ in LATERAL_TARGETS]
+    fig, ax = _make_subplot_grid(len(plot_targets), column_width=10.0)
     for plot_pos, (state_key, param_key, title, direction) in enumerate(plot_targets):
         if fit_data and param_key in fit_data:
             sigma = jnp.asarray(fit_data[param_key]['sigma'])
@@ -381,16 +400,17 @@ def plot_lateral_load_colored_curves(vehicle_states: STMStates, vehicle_forces: 
 
 
 def eval_force_errors(vehicle_states: STMStates, vehicle_forces: STMForces,
-                      tire_params_set: STMTireParams):
+                      tire_params_set: STMTireParams, include_longitudinal: bool = True):
     ''' Evaluate the force errors of the tire model '''
     print(f"{'Target':<24}{'Direction':<20}{'Mean':<20}{'Max':<20}")
     print('-' * 80)
-    for state_key, param_key, title, _ in LONGITUDINAL_TARGETS:
-        force_model = tire_model('MFSimple', getattr(getattr(vehicle_states, state_key), 'sigma_x'),
-                                 getattr(getattr(vehicle_forces, state_key), 'force_z_n'),
-                                 getattr(tire_params_set, param_key))
-        force_errors = jnp.abs(force_model - getattr(getattr(vehicle_forces, state_key), 'force_x_n'))
-        print(f"{title:<24}{'Longitudinal':<20}{jnp.mean(force_errors):<20.2f}{jnp.max(force_errors):<20.2f}")
+    if include_longitudinal:
+        for state_key, param_key, title, _ in LONGITUDINAL_TARGETS:
+            force_model = tire_model('MFSimple', getattr(getattr(vehicle_states, state_key), 'sigma_x'),
+                                     getattr(getattr(vehicle_forces, state_key), 'force_z_n'),
+                                     getattr(tire_params_set, param_key))
+            force_errors = jnp.abs(force_model - getattr(getattr(vehicle_forces, state_key), 'force_x_n'))
+            print(f"{title:<24}{'Longitudinal':<20}{jnp.mean(force_errors):<20.2f}{jnp.max(force_errors):<20.2f}")
     for state_key, param_key, title, _ in LATERAL_TARGETS:
         force_model = tire_model('MFSimple', getattr(getattr(vehicle_states, state_key), 'sigma_y'),
                                  getattr(getattr(vehicle_forces, state_key), 'force_z_n'),

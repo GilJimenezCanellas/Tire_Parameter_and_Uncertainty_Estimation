@@ -36,17 +36,25 @@ from src.utils.filter_data import (
 from src.utils.tiremodels import tire_model
 
 
-FIT_TARGETS = [
+LONGITUDINAL_FIT_TARGETS = [
     ("wheel_fl", "x"),
     ("wheel_fr", "x"),
     ("wheel_rl", "x"),
     ("wheel_rr", "x"),
+]
+LATERAL_FIT_TARGETS = [
     ("front_axle", "y"),
     ("rear_axle", "y"),
 ]
+FIT_TARGETS = LONGITUDINAL_FIT_TARGETS + LATERAL_FIT_TARGETS
 BALANCE_TAIL_QUANTILE = 0.9
 BALANCE_TARGET_POINTS_PER_REGION = 250
 BALANCE_MAX_REGIONS = 12
+
+
+def selected_fit_targets(fit_longitudinal: bool = False) -> list[tuple[str, str]]:
+    """Return tire targets requested for parameter fitting."""
+    return (LONGITUDINAL_FIT_TARGETS if fit_longitudinal else []) + LATERAL_FIT_TARGETS
 
 
 def _clip_shift_component(name: str, value: float, params_min: MFSimpleParams,
@@ -389,15 +397,13 @@ def plot_lateral_estimation(sensordata: FilteredData, vhl_states, vhl_forces, vh
 
 
 def plot_longitudinal_estimation(sensordata: FilteredData, vhl_states, vhl_forces, vhl_params,
-                                 tire_params_set: STMTireParams) -> None:
-    """Visualize total longitudinal force from acceleration, torque-based wheel forces, and fitted tire models."""
+                                 tire_params_set: STMTireParams | None = None,
+                                 include_pacejka: bool = True) -> None:
+    """Visualize total longitudinal force from acceleration, torque-based wheel forces, and optional tire models."""
     time_s = sensordata.gen_data.time
     measured_total_longitudinal_force_n = vhl_params.mass_kg * sensordata.imu_data.acc_cog_x_mps2
     torque_based_total_longitudinal_force_n = calc_total_longitudinal_force_body_n_from_wheel_forces(
         sensordata, vhl_forces
-    )
-    pacejka_total_longitudinal_force_n = calc_total_longitudinal_force_body_n_from_pacejka(
-        sensordata, vhl_states, vhl_forces, tire_params_set
     )
 
     fig, ax = plt.subplots(1, 1, figsize=(12, 4), constrained_layout=True)
@@ -408,12 +414,16 @@ def plot_longitudinal_estimation(sensordata: FilteredData, vhl_states, vhl_force
         label="Sum Fx from torque and angular acceleration",
         color="#E37222",
     )
-    ax.plot(
-        time_s,
-        pacejka_total_longitudinal_force_n,
-        label="Sum Fx from slip ratio + Fz + Bayesian tire models",
-        color="#A2AD00",
-    )
+    if include_pacejka and tire_params_set is not None:
+        pacejka_total_longitudinal_force_n = calc_total_longitudinal_force_body_n_from_pacejka(
+            sensordata, vhl_states, vhl_forces, tire_params_set
+        )
+        ax.plot(
+            time_s,
+            pacejka_total_longitudinal_force_n,
+            label="Sum Fx from slip ratio + Fz + fitted tire models",
+            color="#A2AD00",
+        )
     ax.set_title("Measured vs Estimated Total Longitudinal Force")
     ax.set_xlabel("Time [s]")
     ax.set_ylabel("Force [N]")
@@ -684,8 +694,12 @@ def fit_tire_parameters(conf, sensordata, vhl_params=None):
     tire_params_set_nelder = STMTireParams()
     fit_excitation_samples = {}
     target_sample_points = max(conf.svi_options["sample_points"], conf.nelder_options["sample_points"])
+    fit_longitudinal = bool(getattr(conf, "fit_longitudinal", False))
+    fit_targets = selected_fit_targets(fit_longitudinal)
+    if not fit_longitudinal:
+        print("Longitudinal wheel tire fitting disabled; torque-based Fx is still calculated.")
 
-    for state_key, direction in FIT_TARGETS:
+    for state_key, direction in fit_targets:
         sigma_raw = jnp.array(getattr(getattr(vhl_states, state_key), f"sigma_{direction}"))
         force_n_raw = jnp.array(
             getattr(getattr(vhl_forces, state_key), f"force_{direction}_n")

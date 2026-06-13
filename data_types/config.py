@@ -53,3 +53,4 @@ class Config():
     enable_plotting: bool
     enable_logging: bool
     clean_plots: bool
+    fit_longitudinal: bool = False

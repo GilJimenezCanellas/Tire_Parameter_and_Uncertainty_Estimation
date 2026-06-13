@@ -15,7 +15,7 @@ It intentionally does not provide top-level main scripts, bundled input data, bu
 `src.amz_pipeline` exposes the reusable AMZ pipeline pieces used by `autonomous_2026`:
 
 - `build_filtered_data(data_file, conf, vhl_params)` maps an AMZ `*_data.mat` file into the estimator dataclasses.
-- `fit_tire_parameters(conf, sensordata, vhl_params=None)` fits the configured tire model.
+- `fit_tire_parameters(conf, sensordata, vhl_params=None)` fits the configured tire model. By default it fits only `front_axle_y` and `rear_axle_y`; set `conf.fit_longitudinal = True` to also fit the four wheel longitudinal targets.
 - `plot_lateral_estimation(...)` and `plot_longitudinal_estimation(...)` provide optional diagnostics.
 
 The caller is responsible for loading `conf` and `vhl_params`, choosing output paths, writing results, and deciding whether plots should be shown.
