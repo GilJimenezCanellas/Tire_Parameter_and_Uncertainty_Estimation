@@ -19,7 +19,11 @@ from scipy.signal import savgol_filter
 from data_types.sensordata import CorData, FilteredData, GenData, ImuData
 from data_types.vehicleparameters import MFSimpleParams, STMTireParams
 from src.param_fitting.param_fitting import calc_force_shift, tire_param_fitting
-from src.utils.calc_vhl_states import calc_vhl_forces, calc_vhl_states
+from src.utils.calc_vhl_states import (
+    calc_vhl_forces,
+    calc_vhl_states,
+    validate_required_sensor_signals,
+)
 from src.utils.datamanager import load_params
 from src.utils.filter_data import (
     filter_vhl_data,
@@ -232,6 +236,34 @@ def align_filtered_data_signals(filtered: FilteredData, max_shift_s: float = 0.2
         (
             "cor_data.vel_cog_x_mps",
             np.asarray(filtered.cor_data.vel_cog_x_mps, dtype=float),
+            "gen_data.omega_wheel_fl_radps",
+            np.asarray(filtered.gen_data.omega_wheel_fl_radps, dtype=float),
+            False,
+        ),
+        (
+            "cor_data.vel_cog_x_mps",
+            np.asarray(filtered.cor_data.vel_cog_x_mps, dtype=float),
+            "gen_data.omega_wheel_fr_radps",
+            np.asarray(filtered.gen_data.omega_wheel_fr_radps, dtype=float),
+            False,
+        ),
+        (
+            "cor_data.vel_cog_x_mps",
+            np.asarray(filtered.cor_data.vel_cog_x_mps, dtype=float),
+            "gen_data.omega_wheel_rl_radps",
+            np.asarray(filtered.gen_data.omega_wheel_rl_radps, dtype=float),
+            False,
+        ),
+        (
+            "cor_data.vel_cog_x_mps",
+            np.asarray(filtered.cor_data.vel_cog_x_mps, dtype=float),
+            "gen_data.omega_wheel_rr_radps",
+            np.asarray(filtered.gen_data.omega_wheel_rr_radps, dtype=float),
+            False,
+        ),
+        (
+            "cor_data.vel_cog_x_mps",
+            np.asarray(filtered.cor_data.vel_cog_x_mps, dtype=float),
             "gen_data.omega_m_fl_radps",
             np.asarray(filtered.gen_data.omega_m_fl_radps, dtype=float),
             False,
@@ -298,6 +330,10 @@ def keep_only_fresh_measurement_rows(filtered: FilteredData) -> tuple[FilteredDa
         "imu_data.acc_cog_y_mps2": np.asarray(filtered.imu_data.acc_cog_y_mps2, dtype=float),
         "imu_data.yaw_rate_radps": np.asarray(filtered.imu_data.yaw_rate_radps, dtype=float),
         "gen_data.delta_f_rad": np.asarray(filtered.gen_data.delta_f_rad, dtype=float),
+        "gen_data.omega_wheel_fl_radps": np.asarray(filtered.gen_data.omega_wheel_fl_radps, dtype=float),
+        "gen_data.omega_wheel_fr_radps": np.asarray(filtered.gen_data.omega_wheel_fr_radps, dtype=float),
+        "gen_data.omega_wheel_rl_radps": np.asarray(filtered.gen_data.omega_wheel_rl_radps, dtype=float),
+        "gen_data.omega_wheel_rr_radps": np.asarray(filtered.gen_data.omega_wheel_rr_radps, dtype=float),
         "gen_data.omega_m_fl_radps": np.asarray(filtered.gen_data.omega_m_fl_radps, dtype=float),
         "gen_data.omega_m_fr_radps": np.asarray(filtered.gen_data.omega_m_fr_radps, dtype=float),
         "gen_data.omega_m_rl_radps": np.asarray(filtered.gen_data.omega_m_rl_radps, dtype=float),
@@ -405,18 +441,18 @@ def build_filtered_data(data_file: Path, conf, vhl_params) -> FilteredData:
     acc_x = mat_array(data_mat, "a_X_VE", "a_X_OVS", "a_X_INS", "a_x_VE_direct")
     acc_y = mat_array(data_mat, "a_Y_VE", "a_Y_OVS", "a_Y_INS")
     # steer = mat_array(data_mat, "steering_target_rad")
-    steer_fr = np.asarray(data_mat["delta_W_FR"]).squeeze()
-    steer_fl = np.asarray(data_mat["delta_W_FL"]).squeeze()
+    steer_fr = mat_array(data_mat, "delta_W_FR")
+    steer_fl = mat_array(data_mat, "delta_W_FL")
     steer = (steer_fr + steer_fl) / 2
 
-    omega_m_fl = mat_array(data_mat, "omega_M_FL", default=np.zeros_like(time))
-    omega_m_fr = mat_array(data_mat, "omega_M_FR", default=np.zeros_like(time))
-    omega_m_rl = mat_array(data_mat, "omega_M_RL", default=np.zeros_like(time))
-    omega_m_rr = mat_array(data_mat, "omega_M_RR", default=np.zeros_like(time))
-    t_m_fl = mat_array(data_mat, "T_M_FL", default=np.zeros_like(time))
-    t_m_fr = mat_array(data_mat, "T_M_FR", default=np.zeros_like(time))
-    t_m_rl = mat_array(data_mat, "T_M_RL", default=np.zeros_like(time))
-    t_m_rr = mat_array(data_mat, "T_M_RR", default=np.zeros_like(time))
+    omega_m_fl = mat_array(data_mat, "omega_M_FL")
+    omega_m_fr = mat_array(data_mat, "omega_M_FR")
+    omega_m_rl = mat_array(data_mat, "omega_M_RL")
+    omega_m_rr = mat_array(data_mat, "omega_M_RR")
+    t_m_fl = mat_array(data_mat, "T_M_FL")
+    t_m_fr = mat_array(data_mat, "T_M_FR")
+    t_m_rl = mat_array(data_mat, "T_M_RL")
+    t_m_rr = mat_array(data_mat, "T_M_RR")
     safe_gear_ratio = max(abs(float(vhl_params.gear_ratio)), 1.0e-6)
 
     lengths = [
@@ -561,6 +597,12 @@ def build_filtered_data(data_file: Path, conf, vhl_params) -> FilteredData:
     filtered.gen_data.t_m_rr_nm = jnp.array(np.asarray(data_gen.t_m_rr_nm)[mask])
     filtered.gen_data.gear = jnp.array(np.asarray(data_gen.gear)[mask])
 
+    validate_required_sensor_signals(
+        filtered,
+        include_motor_speeds=True,
+        include_force_inputs=True,
+    )
+
     applied_shifts = align_filtered_data_signals(filtered)
     if applied_shifts:
         print("-" * 80)
@@ -580,6 +622,12 @@ def build_filtered_data(data_file: Path, conf, vhl_params) -> FilteredData:
             if signal_name.startswith("rows_"):
                 continue
             print(f"{signal_name:<60} repeated_rows={removed_count}")
+
+    validate_required_sensor_signals(
+        filtered,
+        include_motor_speeds=True,
+        include_force_inputs=True,
+    )
 
     return filtered
 
