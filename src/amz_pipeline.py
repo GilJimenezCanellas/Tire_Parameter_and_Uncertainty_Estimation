@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
-from typing import Any
 
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -60,29 +59,26 @@ class RosbagSignalSeries:
     values: dict[str, np.ndarray]
 
 
-ROSBAG_TOPIC_CANDIDATES = {
-    "velocity": (
-        "/vcu/nera/velocity_estimation",
-        "/vcu_msgs/velocity_estimation",
-        "/velocity_estimation",
-    ),
-    "torque": (
-        "/vcu/nera/torque_data",
-        "/vcu_msgs/torque_data",
-        "/torque_data",
-    ),
-    "steering": (
-        "/vcu/nera/steering_feedback",
-        "/vcu_msgs/steering_feedback",
-        "/con/nera/car_command",
-        "/car_command",
-    ),
-}
+@dataclass(frozen=True)
+class RosbagTopicSpec:
+    """Fixed AMZ MCAP topic and message type."""
+    topic: str
+    type_name: str
 
-ROSBAG_TYPE_SUFFIXES = {
-    "velocity": ("/VelocityEstimation", "/State", "/Odometry"),
-    "torque": ("/TorqueData",),
-    "steering": ("/DoubleStamped", "/CarCommand", "/FourWheelCarCommand", "/ReferenceState"),
+
+AMZ_ROSBAG_TOPICS = {
+    "velocity": RosbagTopicSpec(
+        "/vcu_msgs/velocity_estimation",
+        "vcu_msgs/msg/VelocityEstimation",
+    ),
+    "torque": RosbagTopicSpec(
+        "/vcu_msgs/torque_data",
+        "vcu_msgs/msg/TorqueData",
+    ),
+    "steering": RosbagTopicSpec(
+        "/vcu_msgs/steering_feedback",
+        "autonomous_msgs/msg/DoubleStamped",
+    ),
 }
 
 
@@ -465,28 +461,6 @@ def plot_longitudinal_estimation(sensordata: FilteredData, vhl_states, vhl_force
     ax.legend()
 
 
-def _first_existing_attr(obj: Any, names: tuple[str, ...]):
-    for name in names:
-        if hasattr(obj, name):
-            return getattr(obj, name)
-    return None
-
-
-def _first_numeric(value) -> float:
-    if value is None:
-        raise ValueError("Missing numeric value")
-    if isinstance(value, (list, tuple)):
-        if not value:
-            raise ValueError("Empty numeric sequence")
-        return float(value[0])
-    try:
-        if len(value) == 0:
-            raise ValueError("Empty numeric sequence")
-        return float(value[0])
-    except TypeError:
-        return float(value)
-
-
 def _message_time_s(msg, fallback_timestamp_ns: int) -> float:
     header = getattr(msg, "header", None)
     stamp = getattr(header, "stamp", None)
@@ -688,83 +662,44 @@ def _detect_rosbag_storage_id(uri: Path, storage_id: str | None) -> str:
     return ""
 
 
-def _resolve_rosbag_topics(topic_types: dict[str, str], topic_overrides: dict[str, str | None]) -> dict[str, str]:
-    resolved = {}
-    for role in ("velocity", "torque", "steering"):
-        override = topic_overrides.get(role)
-        if override:
-            if override not in topic_types:
-                available = ", ".join(sorted(topic_types))
-                raise ValueError(f"Requested {role} topic '{override}' is not in the bag. Available topics: {available}")
-            resolved[role] = override
-            continue
+def _validate_amz_rosbag_topics(topic_types: dict[str, str]) -> dict[str, str]:
+    missing_topics = [
+        spec.topic
+        for spec in AMZ_ROSBAG_TOPICS.values()
+        if spec.topic not in topic_types
+    ]
+    if missing_topics:
+        available = "\n".join(f"{topic}: {type_name}" for topic, type_name in sorted(topic_types.items()))
+        raise ValueError(
+            "The AMZ MCAP parser expects fixed VCU topics from the reference bag. "
+            f"Missing topics: {', '.join(missing_topics)}. Available topics:\n{available}"
+        )
 
-        for candidate in ROSBAG_TOPIC_CANDIDATES[role]:
-            if candidate in topic_types:
-                resolved[role] = candidate
-                break
-        if role in resolved:
-            continue
+    mismatched_types = [
+        f"{spec.topic}: expected {spec.type_name}, found {topic_types[spec.topic]}"
+        for spec in AMZ_ROSBAG_TOPICS.values()
+        if topic_types[spec.topic] != spec.type_name
+    ]
+    if mismatched_types:
+        raise ValueError(
+            "The AMZ MCAP parser expects the message types from the reference bag:\n"
+            + "\n".join(mismatched_types)
+        )
 
-        scored_topics = []
-        for topic, type_name in topic_types.items():
-            score = 0
-            for suffix_index, suffix in enumerate(ROSBAG_TYPE_SUFFIXES[role]):
-                if type_name.endswith(suffix):
-                    score = 100 - suffix_index * 10
-                    break
-            if score == 0:
-                continue
-            topic_lower = topic.lower()
-            if role in topic_lower:
-                score += 6
-            if "steer" in topic_lower and role == "steering":
-                score += 8
-            if "command" in topic_lower and role == "steering":
-                score += 4
-            if "reference" in topic_lower and role == "steering":
-                score += 2
-            if "torque" in topic_lower and role == "torque":
-                score += 8
-            if "velocity" in topic_lower and role == "velocity":
-                score += 8
-            scored_topics.append((score, topic))
-
-        if not scored_topics:
-            available = "\n".join(f"{topic}: {type_name}" for topic, type_name in sorted(topic_types.items()))
-            raise ValueError(f"Could not autodetect a {role} topic in the bag. Available topics:\n{available}")
-        resolved[role] = max(scored_topics)[1]
-    return resolved
+    return {role: spec.topic for role, spec in AMZ_ROSBAG_TOPICS.items()}
 
 
-def _extract_rosbag_values(role: str, type_name: str, msg) -> dict[str, float] | None:
+def _extract_amz_rosbag_values(role: str, msg) -> dict[str, float]:
     if role == "velocity":
-        velocity = _first_existing_attr(msg, ("velocities", "vel"))
-        acceleration = _first_existing_attr(msg, ("accelerations", "acc"))
-        if velocity is not None:
-            values = {
-                "vel_x": float(velocity.x),
-                "vel_y": float(velocity.y),
-                "yaw_rate": float(velocity.theta),
-            }
-            if acceleration is not None:
-                values["acc_x"] = float(acceleration.x)
-                values["acc_y"] = float(acceleration.y)
-            return values
-        if type_name.endswith("/State"):
-            return {
-                "vel_x": float(msg.vx),
-                "vel_y": float(msg.vy),
-                "yaw_rate": float(msg.dyaw),
-            }
-        if type_name == "nav_msgs/msg/Odometry":
-            return {
-                "vel_x": float(msg.twist.twist.linear.x),
-                "vel_y": float(msg.twist.twist.linear.y),
-                "yaw_rate": float(msg.twist.twist.angular.z),
-            }
+        return {
+            "vel_x": float(msg.vel.x),
+            "vel_y": float(msg.vel.y),
+            "yaw_rate": float(msg.vel.theta),
+            "acc_x": float(msg.acc.x),
+            "acc_y": float(msg.acc.y),
+        }
 
-    if role == "torque" and type_name.endswith("/TorqueData"):
+    if role == "torque":
         return {
             "feedback_t_m_fl": float(msg.feedback_t_m_fl),
             "feedback_t_m_fr": float(msg.feedback_t_m_fr),
@@ -777,13 +712,9 @@ def _extract_rosbag_values(role: str, type_name: str, msg) -> dict[str, float] |
         }
 
     if role == "steering":
-        if hasattr(msg, "data"):
-            return {"steer": float(msg.data)}
-        steering_value = _first_existing_attr(msg, ("steering_angle", "delta_s"))
-        if steering_value is not None:
-            return {"steer": _first_numeric(steering_value)}
+        return {"steer": float(msg.data)}
 
-    return None
+    raise ValueError(f"Unknown AMZ ROS bag role: {role}")
 
 
 def _series_from_rosbag_samples(samples: list[tuple[float, dict[str, float]]], role: str) -> RosbagSignalSeries:
@@ -813,7 +744,7 @@ def _series_from_rosbag_samples(samples: list[tuple[float, dict[str, float]]], r
     return RosbagSignalSeries(time_s=time_s, values=series_values)
 
 
-def _read_rosbag_signal_series(data_file: Path, topic_overrides: dict[str, str | None],
+def _read_rosbag_signal_series(data_file: Path,
                                storage_id: str | None = None) -> tuple[dict[str, RosbagSignalSeries], dict[str, str]]:
     try:
         import rosbag2_py
@@ -836,7 +767,7 @@ def _read_rosbag_signal_series(data_file: Path, topic_overrides: dict[str, str |
     )
     reader.open(storage_options, converter_options)
     topic_types = {topic.name: topic.type for topic in reader.get_all_topics_and_types()}
-    resolved_topics = _resolve_rosbag_topics(topic_types, topic_overrides)
+    resolved_topics = _validate_amz_rosbag_topics(topic_types)
     role_by_topic = {topic: role for role, topic in resolved_topics.items()}
     msg_classes = {
         topic: get_message(topic_types[topic])
@@ -850,9 +781,7 @@ def _read_rosbag_signal_series(data_file: Path, topic_overrides: dict[str, str |
         if role is None:
             continue
         msg = deserialize_message(serialized_data, msg_classes[topic])
-        values = _extract_rosbag_values(role, topic_types[topic], msg)
-        if values is None:
-            continue
+        values = _extract_amz_rosbag_values(role, msg)
         samples_by_role[role].append((_message_time_s(msg, timestamp_ns), values))
 
     return (
@@ -1006,9 +935,6 @@ def build_filtered_data(data_file: Path, conf, vhl_params) -> FilteredData:
 
 
 def build_filtered_data_from_rosbag(data_file: Path, conf, vhl_params, *,
-                                    velocity_topic: str | None = None,
-                                    torque_topic: str | None = None,
-                                    steering_topic: str | None = None,
                                     storage_id: str | None = None,
                                     torque_source: str = "auto") -> FilteredData:
     """Map AMZ ROS 2 MCAP data into the estimator's filtered sensor dataclass.
@@ -1024,12 +950,7 @@ def build_filtered_data_from_rosbag(data_file: Path, conf, vhl_params, *,
             "the bags do not contain wheel-speed feedback."
         )
 
-    topic_overrides = {
-        "velocity": velocity_topic,
-        "torque": torque_topic,
-        "steering": steering_topic,
-    }
-    series_by_role, resolved_topics = _read_rosbag_signal_series(data_file, topic_overrides, storage_id)
+    series_by_role, resolved_topics = _read_rosbag_signal_series(data_file, storage_id)
     setattr(conf, "rosbag_topics", resolved_topics)
 
     velocity_series = series_by_role["velocity"]
