@@ -71,10 +71,6 @@ AMZ_ROSBAG_TOPICS = {
         "/vcu/nera/velocity_estimation",
         "autonomous_msgs_nera/msg/VelocityEstimation",
     ),
-    "torque": RosbagTopicSpec(
-        "/vcu/nera/torque_data",
-        "autonomous_msgs_nera/msg/TorqueData",
-    ),
     "steering": RosbagTopicSpec(
         "/vcu/nera/steering_feedback",
         "autonomous_msgs_nera/msg/DoubleStamped",
@@ -429,10 +425,10 @@ def plot_lateral_estimation(sensordata: FilteredData, vhl_states, vhl_forces, vh
 def plot_longitudinal_estimation(sensordata: FilteredData, vhl_states, vhl_forces, vhl_params,
                                  tire_params_set: STMTireParams | None = None,
                                  include_pacejka: bool = True) -> None:
-    """Visualize total longitudinal force from acceleration, torque-based wheel forces, and optional tire models."""
+    """Visualize total longitudinal force from acceleration, wheel forces, and optional tire models."""
     time_s = sensordata.gen_data.time
     measured_total_longitudinal_force_n = vhl_params.mass_kg * sensordata.imu_data.acc_cog_x_mps2
-    torque_based_total_longitudinal_force_n = calc_total_longitudinal_force_body_n_from_wheel_forces(
+    wheel_force_total_longitudinal_force_n = calc_total_longitudinal_force_body_n_from_wheel_forces(
         sensordata, vhl_forces
     )
 
@@ -440,8 +436,8 @@ def plot_longitudinal_estimation(sensordata: FilteredData, vhl_states, vhl_force
     ax.plot(time_s, measured_total_longitudinal_force_n, label="Measured m * ax", color="#0065BD")
     ax.plot(
         time_s,
-        torque_based_total_longitudinal_force_n,
-        label="Sum Fx from torque and angular acceleration",
+        wheel_force_total_longitudinal_force_n,
+        label="Sum wheel Fx used by force model",
         color="#E37222",
     )
     if include_pacejka and tire_params_set is not None:
@@ -553,7 +549,8 @@ def _copy_masked_sections(data_cor: CorData, data_imu: ImuData, data_gen: GenDat
 
 
 def _required_input_matrix(data_cor: CorData, data_imu: ImuData, data_gen: GenData,
-                           include_motor_speeds: bool) -> np.ndarray:
+                           include_motor_speeds: bool,
+                           include_force_inputs: bool) -> np.ndarray:
     required_signals = [
         np.asarray(data_cor.time),
         np.asarray(data_cor.vel_cog_x_mps),
@@ -566,11 +563,16 @@ def _required_input_matrix(data_cor: CorData, data_imu: ImuData, data_gen: GenDa
         np.asarray(data_gen.omega_wheel_fr_radps),
         np.asarray(data_gen.omega_wheel_rl_radps),
         np.asarray(data_gen.omega_wheel_rr_radps),
-        np.asarray(data_gen.t_m_fl_nm),
-        np.asarray(data_gen.t_m_fr_nm),
-        np.asarray(data_gen.t_m_rl_nm),
-        np.asarray(data_gen.t_m_rr_nm),
     ]
+    if include_force_inputs:
+        required_signals.extend(
+            [
+                np.asarray(data_gen.t_m_fl_nm),
+                np.asarray(data_gen.t_m_fr_nm),
+                np.asarray(data_gen.t_m_rl_nm),
+                np.asarray(data_gen.t_m_rr_nm),
+            ]
+        )
     if include_motor_speeds:
         required_signals.extend(
             [
@@ -585,6 +587,7 @@ def _required_input_matrix(data_cor: CorData, data_imu: ImuData, data_gen: GenDa
 
 def _finalize_filtered_sections(data_cor: CorData, data_imu: ImuData, data_gen: GenData, conf,
                                 *, include_motor_speeds: bool = True,
+                                include_force_inputs: bool = True,
                                 align_signals: bool = True,
                                 filter_fresh_measurements: bool = True) -> FilteredData:
     data_cor = vel_offset_correction(conf.lambda_v, data_cor)
@@ -604,7 +607,7 @@ def _finalize_filtered_sections(data_cor: CorData, data_imu: ImuData, data_gen: 
         data_imu.acc_cog_z_mps2 = jnp.ones_like(data_imu.acc_cog_z_mps2) * 9.81
 
     finite_mask = np.isfinite(
-        _required_input_matrix(data_cor, data_imu, data_gen, include_motor_speeds)
+        _required_input_matrix(data_cor, data_imu, data_gen, include_motor_speeds, include_force_inputs)
     ).all(axis=1)
     speed_mask = np.asarray(data_cor.vel_cog_x_mps) > conf.low_speed_filter_mps
     filtered = _copy_masked_sections(data_cor, data_imu, data_gen, finite_mask & speed_mask)
@@ -612,7 +615,7 @@ def _finalize_filtered_sections(data_cor: CorData, data_imu: ImuData, data_gen: 
     validate_required_sensor_signals(
         filtered,
         include_motor_speeds=include_motor_speeds,
-        include_force_inputs=True,
+        include_force_inputs=include_force_inputs,
     )
 
     if align_signals:
@@ -640,7 +643,7 @@ def _finalize_filtered_sections(data_cor: CorData, data_imu: ImuData, data_gen: 
     validate_required_sensor_signals(
         filtered,
         include_motor_speeds=include_motor_speeds,
-        include_force_inputs=True,
+        include_force_inputs=include_force_inputs,
     )
     return filtered
 
@@ -697,18 +700,6 @@ def _extract_amz_rosbag_values(role: str, msg) -> dict[str, float]:
             "yaw_rate": float(msg.velocities.theta),
             "acc_x": float(msg.accelerations.x),
             "acc_y": float(msg.accelerations.y),
-        }
-
-    if role == "torque":
-        return {
-            "feedback_t_m_fl": float(msg.feedback_t_m_fl),
-            "feedback_t_m_fr": float(msg.feedback_t_m_fr),
-            "feedback_t_m_rl": float(msg.feedback_t_m_rl),
-            "feedback_t_m_rr": float(msg.feedback_t_m_rr),
-            "reference_t_m_fl": float(msg.reference_t_m_fl),
-            "reference_t_m_fr": float(msg.reference_t_m_fr),
-            "reference_t_m_rl": float(msg.reference_t_m_rl),
-            "reference_t_m_rr": float(msg.reference_t_m_rr),
         }
 
     if role == "steering":
@@ -815,23 +806,6 @@ def _interpolate_series(series: RosbagSignalSeries, target_time_s: np.ndarray,
             raise ValueError(f"Required field '{field_name}' was not found in {label} samples.")
         values[field_name] = np.interp(target_time_s, series.time_s, series.values[field_name])
     return values
-
-
-def _choose_rosbag_torque_source(torque_values: dict[str, np.ndarray], requested_source: str) -> str:
-    if requested_source not in {"auto", "feedback", "reference"}:
-        raise ValueError("rosbag torque source must be 'auto', 'feedback', or 'reference'.")
-    if requested_source != "auto":
-        return requested_source
-
-    feedback_keys = ("feedback_t_m_fl", "feedback_t_m_fr", "feedback_t_m_rl", "feedback_t_m_rr")
-    reference_keys = ("reference_t_m_fl", "reference_t_m_fr", "reference_t_m_rl", "reference_t_m_rr")
-    feedback_has_signal = any(np.any(np.abs(torque_values[key]) > 1.0e-9) for key in feedback_keys)
-    reference_has_signal = any(np.any(np.abs(torque_values[key]) > 1.0e-9) for key in reference_keys)
-    if feedback_has_signal:
-        return "feedback"
-    if reference_has_signal:
-        return "reference"
-    return "feedback"
 
 
 def mat_array(mat_data: dict, *names: str, default: np.ndarray | None = None) -> np.ndarray:
@@ -952,14 +926,14 @@ def build_filtered_data(data_file: Path, conf, vhl_params) -> FilteredData:
 
 
 def build_filtered_data_from_rosbag(data_file: Path, conf, vhl_params, *,
-                                    storage_id: str | None = None,
-                                    torque_source: str = "auto") -> FilteredData:
+                                    storage_id: str | None = None) -> FilteredData:
     """Map AMZ ROS 2 MCAP data into the estimator's filtered sensor dataclass.
 
     MCAP logs currently do not contain wheel-speed feedback. The builder
     synthesizes rolling wheel speeds from vehicle velocity only to keep lateral
-    tire-state calculations well-defined; longitudinal tire fitting is rejected
-    because real longitudinal slip is unavailable.
+    tire-state calculations well-defined. Longitudinal tire fitting is rejected
+    and wheel longitudinal forces are set to zero because real longitudinal slip
+    and force feedback are unavailable.
     """
     if bool(getattr(conf, "fit_longitudinal", False)):
         raise ValueError(
@@ -971,16 +945,13 @@ def build_filtered_data_from_rosbag(data_file: Path, conf, vhl_params, *,
     setattr(conf, "rosbag_topics", resolved_topics)
 
     velocity_series = series_by_role["velocity"]
-    torque_series = series_by_role["torque"]
     steering_series = series_by_role["steering"]
     overlap_start_s = max(
         float(velocity_series.time_s[0]),
-        float(torque_series.time_s[0]),
         float(steering_series.time_s[0]),
     )
     overlap_end_s = min(
         float(velocity_series.time_s[-1]),
-        float(torque_series.time_s[-1]),
         float(steering_series.time_s[-1]),
     )
     if overlap_end_s <= overlap_start_s:
@@ -1019,25 +990,7 @@ def build_filtered_data_from_rosbag(data_file: Path, conf, vhl_params, *,
     steering_values = _interpolate_series(steering_series, base_time_abs_s, ("steer",), "steering")
     steer = steering_values["steer"]
 
-    torque_values = _interpolate_series(
-        torque_series,
-        base_time_abs_s,
-        (
-            "feedback_t_m_fl",
-            "feedback_t_m_fr",
-            "feedback_t_m_rl",
-            "feedback_t_m_rr",
-            "reference_t_m_fl",
-            "reference_t_m_fr",
-            "reference_t_m_rl",
-            "reference_t_m_rr",
-        ),
-        "torque",
-    )
-    selected_torque_source = _choose_rosbag_torque_source(torque_values, torque_source)
-    setattr(conf, "rosbag_torque_source_requested", torque_source)
-    setattr(conf, "rosbag_torque_source_used", selected_torque_source)
-    setattr(conf, "longitudinal_force_mode", "ideal_torque")
+    setattr(conf, "longitudinal_force_mode", "zero")
 
     time = base_time_abs_s - base_time_abs_s[0]
     size = len(time)
@@ -1083,10 +1036,10 @@ def build_filtered_data_from_rosbag(data_file: Path, conf, vhl_params, *,
         omega_m_fr_radps=jnp.array(omega_fr * safe_gear_ratio),
         omega_m_rl_radps=jnp.array(omega_rl * safe_gear_ratio),
         omega_m_rr_radps=jnp.array(omega_rr * safe_gear_ratio),
-        t_m_fl_nm=jnp.array(torque_values[f"{selected_torque_source}_t_m_fl"]),
-        t_m_fr_nm=jnp.array(torque_values[f"{selected_torque_source}_t_m_fr"]),
-        t_m_rl_nm=jnp.array(torque_values[f"{selected_torque_source}_t_m_rl"]),
-        t_m_rr_nm=jnp.array(torque_values[f"{selected_torque_source}_t_m_rr"]),
+        t_m_fl_nm=jnp.zeros(size),
+        t_m_fr_nm=jnp.zeros(size),
+        t_m_rl_nm=jnp.zeros(size),
+        t_m_rr_nm=jnp.zeros(size),
         gear=jnp.zeros(size),
     )
 
@@ -1096,6 +1049,7 @@ def build_filtered_data_from_rosbag(data_file: Path, conf, vhl_params, *,
         data_gen,
         conf,
         include_motor_speeds=False,
+        include_force_inputs=False,
         align_signals=False,
         filter_fresh_measurements=False,
     )
@@ -1150,6 +1104,8 @@ def fit_tire_parameters(conf, sensordata, vhl_params=None):
             )
 
     delta_dot = jnp.gradient(sensordata.gen_data.delta_f_rad, sensordata.gen_data.time)
+    fit_longitudinal = bool(getattr(conf, "fit_longitudinal", False))
+    fit_targets = selected_fit_targets(fit_longitudinal)
 
     # Transient rejection
     vhl_states, vhl_forces, steady_mask = reject_transient_data(
@@ -1162,7 +1118,13 @@ def fit_tire_parameters(conf, sensordata, vhl_params=None):
 
     # Outlier rejection
     if conf.vhl_data_filter:
-        vhl_states, vhl_forces, outlier_mask = filter_vhl_data(vhl_states, vhl_forces, 1.8, return_mask=True)
+        vhl_states, vhl_forces, outlier_mask = filter_vhl_data(
+            vhl_states,
+            vhl_forces,
+            1.8,
+            return_mask=True,
+            fit_targets=fit_targets,
+        )
         delta_dot = jnp.array(np.asarray(delta_dot)[outlier_mask])
 
     tire_params_set_svi = STMTireParams()
@@ -1170,10 +1132,12 @@ def fit_tire_parameters(conf, sensordata, vhl_params=None):
     tire_params_set_nelder = STMTireParams()
     fit_excitation_samples = {}
     target_sample_points = max(conf.svi_options["sample_points"], conf.nelder_options["sample_points"])
-    fit_longitudinal = bool(getattr(conf, "fit_longitudinal", False))
-    fit_targets = selected_fit_targets(fit_longitudinal)
     if not fit_longitudinal:
-        print("Longitudinal wheel tire fitting disabled; torque-based Fx is still calculated.")
+        longitudinal_force_mode = getattr(conf, "longitudinal_force_mode", "wheel_dynamics")
+        if longitudinal_force_mode == "zero":
+            print("Longitudinal wheel tire fitting disabled; wheel Fx is set to zero for this input.")
+        else:
+            print("Longitudinal wheel tire fitting disabled; wheel Fx is still calculated for force reconstruction.")
 
     for state_key, direction in fit_targets:
         sigma_raw = jnp.array(getattr(getattr(vhl_states, state_key), f"sigma_{direction}"))

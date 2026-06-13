@@ -123,17 +123,18 @@ def preprocess_data(conf: Config, all_data: FilteredData = FilteredData()):
     return all_data
 
 def filter_vhl_data(vhl_states: STMStates, vhl_forces: STMForces, threshold: float = 2,
-                    return_mask: bool = False):
+                    return_mask: bool = False, fit_targets: list[tuple[str, str]] | None = None):
     ''' Filter states and forces for outliers with a maximum standard deviation threshold (2 times default)'''
     mask = jnp.ones_like(vhl_states.beta, dtype=bool)
-    fit_targets = [
-        ('wheel_fl', 'x'),
-        ('wheel_fr', 'x'),
-        ('wheel_rl', 'x'),
-        ('wheel_rr', 'x'),
-        ('front_axle', 'y'),
-        ('rear_axle', 'y'),
-    ]
+    if fit_targets is None:
+        fit_targets = [
+            ('wheel_fl', 'x'),
+            ('wheel_fr', 'x'),
+            ('wheel_rl', 'x'),
+            ('wheel_rr', 'x'),
+            ('front_axle', 'y'),
+            ('rear_axle', 'y'),
+        ]
     for axle, key in fit_targets:
         sigma_values = getattr(getattr(vhl_states, axle), 'sigma_' + key)
         force_values = getattr(getattr(vhl_forces, axle), 'force_' + key + '_n')
