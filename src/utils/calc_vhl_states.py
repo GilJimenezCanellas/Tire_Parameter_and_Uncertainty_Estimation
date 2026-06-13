@@ -194,9 +194,8 @@ def calc_vhl_forces(model: str, sensordata: FilteredData, vhlstates: STMStates, 
         sensordata.cor_data.vel_cog_x_mps**2
     # Forces on center of gravity
     stm_forces.cog.force_z_n = vhlparams.mass_kg * sensordata.imu_data.acc_cog_z_mps2
-    force_roll_n = vhlparams.tire_roll_resistance * stm_forces.cog.force_z_n
     stm_forces.cog.force_x_n = vhlparams.mass_kg * \
-        sensordata.imu_data.acc_cog_x_mps2 + force_drag_n + force_roll_n
+        sensordata.imu_data.acc_cog_x_mps2 + force_drag_n
     stm_forces.cog.force_y_n = vhlparams.mass_kg * sensordata.imu_data.acc_cog_y_mps2
     # Axle Loads
     load_front_n, load_rear_n = calc_axle_loads(sensordata, vhlparams)

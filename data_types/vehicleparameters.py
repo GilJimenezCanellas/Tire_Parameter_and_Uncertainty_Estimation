@@ -56,7 +56,6 @@ class VhlParams:
     r_tire_unloaded_rear_m: float
     gear_ratio: float
     wheel_inertia_kgm2: float
-    tire_roll_resistance: float
     ### Aero ###
     cw: float
     cl_front: float
