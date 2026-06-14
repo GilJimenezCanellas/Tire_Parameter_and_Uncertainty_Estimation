@@ -55,3 +55,9 @@ class Config():
     clean_plots: bool
     fit_longitudinal: bool = False
     longitudinal_force_mode: str = "wheel_dynamics"
+    params_init_wheel_fl_x: dict | None = None
+    params_init_wheel_fr_x: dict | None = None
+    params_init_wheel_rl_x: dict | None = None
+    params_init_wheel_rr_x: dict | None = None
+    params_init_front_axle_y: dict | None = None
+    params_init_rear_axle_y: dict | None = None

@@ -326,7 +326,8 @@ def select_balanced_fit_samples(sigma_values, force_values, load_values, yaw_acc
 
 
 def select_steady_fit_samples(sigma_values, force_values, load_values, yaw_accel_values, steer_vel_values,
-                              target_count: int, yaw_weight: float = 1.0, steer_weight: float = 1.0):
+                              target_count: int, yaw_weight: float = 1.0, steer_weight: float = 1.0,
+                              balance_sign: bool = False):
     '''Select the least-transient samples globally, without balancing slip regions.'''
     sigma_values = np.asarray(sigma_values, dtype=float).ravel()
     force_values = np.asarray(force_values, dtype=float).ravel()
@@ -358,14 +359,38 @@ def select_steady_fit_samples(sigma_values, force_values, load_values, yaw_accel
     steer_scale = _robust_abs_scale(steer_vel_values)
     transient_score = yaw_weight * np.abs(yaw_accel_values) / yaw_scale
     transient_score += steer_weight * np.abs(steer_vel_values) / steer_scale
-    selected_indices = np.sort(np.argsort(transient_score, kind='stable')[:target_count])
+    if balance_sign:
+        negative_indices = np.flatnonzero(sigma_values < 0.0)
+        positive_indices = np.flatnonzero(sigma_values > 0.0)
+        per_side_count = min(target_count // 2, negative_indices.size, positive_indices.size)
+        if per_side_count > 0:
+            selected_negative = negative_indices[
+                np.argsort(transient_score[negative_indices], kind='stable')[:per_side_count]
+            ]
+            selected_positive = positive_indices[
+                np.argsort(transient_score[positive_indices], kind='stable')[:per_side_count]
+            ]
+            selected_indices = np.sort(np.concatenate((selected_negative, selected_positive)))
+            region_counts_before = [int(negative_indices.size), int(positive_indices.size)]
+            region_counts_after = [int(per_side_count), int(per_side_count)]
+        else:
+            selected_indices = np.sort(np.argsort(transient_score, kind='stable')[:target_count])
+            region_counts_before = [int(negative_indices.size), int(positive_indices.size)]
+            region_counts_after = [
+                int(np.count_nonzero(sigma_values[selected_indices] < 0.0)),
+                int(np.count_nonzero(sigma_values[selected_indices] > 0.0)),
+            ]
+    else:
+        selected_indices = np.sort(np.argsort(transient_score, kind='stable')[:target_count])
+        region_counts_before = [int(sigma_values.size)]
+        region_counts_after = [int(selected_indices.size)]
 
     return {
         'sigma': jnp.array(sigma_values[selected_indices]),
         'force_n': jnp.array(force_values[selected_indices]),
         'load_n': jnp.array(load_values[selected_indices]),
         'region_edges': np.array([-np.inf, np.inf], dtype=float),
-        'region_counts_before': [int(sigma_values.size)],
-        'region_counts_after': [int(selected_indices.size)],
+        'region_counts_before': region_counts_before,
+        'region_counts_after': region_counts_after,
         'transient_score': jnp.array(transient_score[selected_indices]),
     }

@@ -51,6 +51,7 @@ FIT_TARGETS = LONGITUDINAL_FIT_TARGETS + LATERAL_FIT_TARGETS
 BALANCE_TAIL_QUANTILE = 0.9
 BALANCE_TARGET_POINTS_PER_REGION = 250
 BALANCE_MAX_REGIONS = 12
+FITTED_PARAM_NAMES = ("B", "C", "D", "E", "S_H", "S_V")
 
 
 @dataclass
@@ -112,6 +113,28 @@ def _clip_lateral_force_shift(vertical_shift_n: float, horizontal_shift_rad: flo
         clipped_horizontal_shift_rad,
         vertical_was_clipped or horizontal_was_clipped,
     )
+
+
+def _effective_sampling_freq_hz(conf, vhl_params) -> float:
+    """Return vehicle sampling frequency, falling back to estimator config."""
+    sampling_freq_hz = float(getattr(vhl_params, "sampling_freq_hz", 0.0) or 0.0)
+    if sampling_freq_hz <= 0.0:
+        sampling_freq_hz = float(getattr(conf, "sampling_freq_hz", 0.0) or 0.0)
+    return sampling_freq_hz
+
+
+def _target_params_init(conf, param_key: str, global_params_init: MFSimpleParams) -> MFSimpleParams:
+    """Merge optional target-specific initial/fixed parameter values into params_init."""
+    merged_values = {
+        name: float(getattr(global_params_init, name))
+        for name in FITTED_PARAM_NAMES
+    }
+    target_values = getattr(conf, f"params_init_{param_key}", None)
+    if target_values:
+        for name, value in target_values.items():
+            if name in merged_values:
+                merged_values[name] = float(value)
+    return MFSimpleParams(**merged_values)
 
 
 def calc_total_lateral_force_body_n_from_pacejka(sensordata: FilteredData, vhl_states, vhl_forces,
@@ -621,6 +644,13 @@ def _finalize_filtered_sections(data_cor: CorData, data_imu: ImuData, data_gen: 
             f"kept {int(np.count_nonzero(initial_mask))}/{initial_mask.size} rows "
             f"with |ay| > {min_abs_ay_mps2:.3g} m/s^2."
         )
+    if not np.any(initial_mask):
+        raise ValueError(
+            "Preprocessing removed all rows before fitting: "
+            f"finite rows={int(np.count_nonzero(finite_mask))}/{finite_mask.size}, "
+            f"rows above low_speed_filter_mps={int(np.count_nonzero(speed_mask))}/{speed_mask.size} "
+            f"(threshold={float(conf.low_speed_filter_mps):.3g} m/s)."
+        )
     filtered = _copy_masked_sections(data_cor, data_imu, data_gen, initial_mask)
 
     validate_required_sensor_signals(
@@ -819,11 +849,22 @@ def _interpolate_series(series: RosbagSignalSeries, target_time_s: np.ndarray,
     return values
 
 
-def mat_array(mat_data: dict, *names: str, default: np.ndarray | None = None) -> np.ndarray:
+def mat_array(mat_data: dict, *names: str, default: np.ndarray | None = None,
+              require_dynamic: bool = False) -> np.ndarray:
     """Return the first available signal as a flat float array."""
+    first_available = None
     for name in names:
         if name in mat_data:
-            return np.asarray(mat_data[name], dtype=float).squeeze()
+            values = np.asarray(mat_data[name], dtype=float).squeeze()
+            if first_available is None:
+                first_available = values
+            if require_dynamic:
+                finite_values = values[np.isfinite(values)]
+                if finite_values.size == 0 or np.allclose(finite_values, 0.0):
+                    continue
+            return values
+    if first_available is not None:
+        return first_available
     if default is not None:
         return np.asarray(default, dtype=float).squeeze()
     raise KeyError(f"None of the signals were found: {names}")
@@ -833,12 +874,11 @@ def build_filtered_data(data_file: Path, conf, vhl_params) -> FilteredData:
     """Map AMZ run data into the estimator's filtered sensor dataclass."""
     data_mat = loadmat(data_file, squeeze_me=True, struct_as_record=False)
 
-    time = mat_array(data_mat, "Time")
-    vel_x = mat_array(data_mat, "v_X_VE", "v_X_OVS", "V_x")
-    vel_y = mat_array(data_mat, "v_Y_VE", "v_Y_OVS")
-    yaw_rate = mat_array(data_mat, "omega_Z_VE", "omega_Z_INS", "omega_Z_OVS")
-    acc_x = mat_array(data_mat, "a_X_VE", "a_X_OVS", "a_X_INS", "a_x_VE_direct")
-    acc_y = mat_array(data_mat, "a_Y_VE", "a_Y_OVS", "a_Y_INS")
+    vel_x = mat_array(data_mat, "v_X_VE", "v_X_INS", "v_X_OVS", "V_x", require_dynamic=True)
+    vel_y = mat_array(data_mat, "v_Y_VE", "v_Y_INS", "v_Y_OVS", require_dynamic=True)
+    yaw_rate = mat_array(data_mat, "omega_Z_VE", "omega_Z_INS", "omega_Z_OVS", require_dynamic=True)
+    acc_x = mat_array(data_mat, "a_X_VE", "a_X_OVS", "a_X_INS", "a_x_VE_direct", require_dynamic=True)
+    acc_y = mat_array(data_mat, "a_Y_VE", "a_Y_OVS", "a_Y_INS", require_dynamic=True)
     # steer = mat_array(data_mat, "steering_target_rad")
     steer_fr = mat_array(data_mat, "delta_W_FR")
     steer_fl = mat_array(data_mat, "delta_W_FL")
@@ -853,11 +893,11 @@ def build_filtered_data(data_file: Path, conf, vhl_params) -> FilteredData:
     t_m_rl = mat_array(data_mat, "T_M_RL")
     t_m_rr = mat_array(data_mat, "T_M_RR")
     safe_gear_ratio = max(abs(float(vhl_params.gear_ratio)), 1.0e-6)
+    time = mat_array(data_mat, "Time") if "Time" in data_mat else None
 
     lengths = [
         len(signal)
         for signal in (
-            time,
             vel_x,
             vel_y,
             acc_x,
@@ -874,8 +914,23 @@ def build_filtered_data(data_file: Path, conf, vhl_params) -> FilteredData:
             t_m_rr,
         )
     ]
+    if time is not None:
+        lengths.append(len(time))
     size = min(lengths)
-    time = time[:size] - time[0]
+    if time is None:
+        sampling_freq_hz = _effective_sampling_freq_hz(conf, vhl_params)
+        if sampling_freq_hz <= 0.0:
+            raise KeyError(
+                "Signal 'Time' was not found and no positive sampling_freq_hz "
+                "was configured in the vehicle parameters or estimator config."
+            )
+        time = np.arange(size, dtype=float) / sampling_freq_hz
+        print(
+            "Signal 'Time' not found in MAT file; "
+            f"using constant {sampling_freq_hz:.3g} Hz sample time from configuration."
+        )
+    else:
+        time = time[:size] - time[0]
     vel_x = vel_x[:size]
     vel_y = vel_y[:size]
     acc_x = acc_x[:size]
@@ -1158,6 +1213,7 @@ def fit_tire_parameters(conf, sensordata, vhl_params=None):
         load_n_raw = jnp.array(getattr(vhl_forces, state_key).force_z_n)
         fit_flags = getattr(conf, f"fit_flags_{state_key}_{direction}")
         param_key = f"{state_key}_{direction}"
+        target_params_init = _target_params_init(conf, param_key, params_init)
         if bool(getattr(conf, "skidpad_mode", False)):
             balanced_samples = select_steady_fit_samples(
                 sigma_raw,
@@ -1166,6 +1222,7 @@ def fit_tire_parameters(conf, sensordata, vhl_params=None):
                 vhl_states.dd_psi,
                 delta_dot,
                 target_count=target_sample_points,
+                balance_sign=True,
             )
             selection_label = "Skidpad steady-state selection"
         else:
@@ -1199,7 +1256,12 @@ def fit_tire_parameters(conf, sensordata, vhl_params=None):
             shift_s_v, shift_s_h = calc_force_shift(sigma, force_n)
         except ValueError:
             shift_source = "raw"
-            shift_s_v, shift_s_h = calc_force_shift(sigma_raw, force_n_raw)
+            try:
+                shift_s_v, shift_s_h = calc_force_shift(sigma_raw, force_n_raw)
+            except ValueError:
+                shift_source = "target init"
+                shift_s_v = target_params_init.S_V
+                shift_s_h = target_params_init.S_H
 
         if direction == "y":
             unclipped_s_v = shift_s_v
@@ -1214,11 +1276,11 @@ def fit_tire_parameters(conf, sensordata, vhl_params=None):
                     f"S_H {unclipped_s_h:.6g} -> {shift_s_h:.6g}"
                 )
 
-        params_init.S_V = shift_s_v
-        params_init.S_H = shift_s_h
+        target_params_init.S_V = shift_s_v
+        target_params_init.S_H = shift_s_h
         print(
             f"Force shift - {state_key} {direction} ({shift_source} samples): "
-            f"S_V={params_init.S_V:.6g}, S_H={params_init.S_H:.6g}"
+            f"S_V={target_params_init.S_V:.6g}, S_H={target_params_init.S_H:.6g}"
         )
         print(f"Fitting - {state_key} {direction}")
         svi_options = dict(conf.svi_options)
@@ -1231,7 +1293,7 @@ def fit_tire_parameters(conf, sensordata, vhl_params=None):
             sigma,
             force_n,
             load_n,
-            params_init,
+            target_params_init,
             params_min,
             params_max,
             svi_options,
@@ -1243,7 +1305,7 @@ def fit_tire_parameters(conf, sensordata, vhl_params=None):
             sigma,
             force_n,
             load_n,
-            params_init,
+            target_params_init,
             params_min,
             params_max,
             nelder_options,

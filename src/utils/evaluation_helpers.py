@@ -80,6 +80,27 @@ def _build_symmetric_bins(value_sets, num_bins: int, min_half_range: float = 1.0
     return np.linspace(-max_abs, max_abs, num_bins + 1)
 
 
+def _padded_limits(values, min_span: float = 1.0e-6, padding_fraction: float = 0.05):
+    '''Return finite axis limits with padding, or None when no finite values exist.'''
+    finite_values = np.asarray(values, dtype=float)
+    finite_values = finite_values[np.isfinite(finite_values)]
+    if finite_values.size == 0:
+        return None
+    lower = float(np.min(finite_values))
+    upper = float(np.max(finite_values))
+    span = max(upper - lower, min_span)
+    padding = span * padding_fraction
+    return lower - padding, upper + padding
+
+
+def _combine_limits(limits):
+    '''Combine existing axis-limit tuples into one finite range.'''
+    finite_limits = [limit for limit in limits if limit is not None]
+    if not finite_limits:
+        return None
+    return min(limit[0] for limit in finite_limits), max(limit[1] for limit in finite_limits)
+
+
 def _summarize_excitation(values):
     '''Compute compact balance statistics for histogram annotations.'''
     total = int(values.size)
@@ -187,37 +208,73 @@ def plot_excitation_histograms(excitation_source, num_bins: int = 30, include_lo
 
 
 def plot_bell_curves(params: STMTireParams, std_params: STMTireParams, params_min: MFSimpleParams,
-                     params_max: MFSimpleParams, include_longitudinal: bool = True):
+                     params_max: MFSimpleParams, include_longitudinal: bool = True,
+                     fit_flags_by_target: dict | None = None):
     ''' Plot the parameter distributions as bell curves '''
     if not params:
         print("No parameters to plot.")
         return
     param_names = ['B', 'C', 'D', 'E']
-    column_width = 3.5
+    column_width = 6.5
     plot_targets = _selected_targets(include_longitudinal)
     tum_color = {param_key: color for _, param_key, _, color in plot_targets}
     fig, axes = plt.subplots(2, 2, figsize=(column_width, column_width), sharex=False)
     axes = axes.flatten()
-    used_labels = []
+    legend_handles = {}
     for i, param_name in enumerate(param_names):
+        fixed_annotations = []
         for _, key, _, _ in plot_targets:
             mean = getattr(params, key).__dict__[param_name]
             std_dev = getattr(std_params, key).__dict__[param_name]
-            x = jnp.linspace(params_min.__dict__[param_name],
-                             params_max.__dict__[param_name], 100)
-            y = norm.pdf(x, mean, std_dev)
-            y = y / jnp.sum(y)
-            if key not in used_labels:
-                used_labels.append(key)
-            axes[i].plot(x, y, color=tum_color[key])
+            fit_flags = (fit_flags_by_target or {}).get(key, {})
+            is_optimized = bool(fit_flags.get(param_name, std_dev > 0.0))
+            if is_optimized and np.isfinite(std_dev) and std_dev > 0.0:
+                x = jnp.linspace(params_min.__dict__[param_name],
+                                 params_max.__dict__[param_name], 100)
+                y = norm.pdf(x, mean, std_dev)
+                y_sum = jnp.sum(y)
+                if np.isfinite(float(y_sum)) and float(y_sum) > 0.0:
+                    y = y / y_sum
+                line, = axes[i].plot(x, y, color=tum_color[key], label=key)
+                legend_handles.setdefault(key, line)
+            else:
+                line = axes[i].axvline(
+                    mean,
+                    color=tum_color[key],
+                    linestyle='--' if not is_optimized else ':',
+                    linewidth=1.7,
+                    alpha=0.95,
+                    label=key,
+                )
+                legend_handles.setdefault(key, line)
+                status = 'fixed' if not is_optimized else 'zero std'
+                fixed_annotations.append(f"{key}: {mean:.4g} ({status})")
         axes[i].set_title(f'Parameter {param_name}')
         axes[i].set_ylabel('Probability Density', fontsize=10)
         axes[i].set_xlim(params_min.__dict__[param_name],
                          params_max.__dict__[param_name])
         axes[i].grid(True, alpha=0.3)
-        fig.legend(labels=used_labels, loc='upper center', bbox_to_anchor=(
-            0.5, 0.05), ncol=3, frameon=False, fontsize=10)
-    plt.tight_layout()
+        if fixed_annotations:
+            axes[i].text(
+                0.03,
+                0.95,
+                '\n'.join(fixed_annotations),
+                transform=axes[i].transAxes,
+                ha='left',
+                va='top',
+                fontsize=8,
+                bbox={'boxstyle': 'round', 'facecolor': 'white', 'alpha': 0.85, 'edgecolor': 'none'},
+            )
+    fig.legend(
+        handles=list(legend_handles.values()),
+        labels=list(legend_handles.keys()),
+        loc='upper center',
+        bbox_to_anchor=(0.5, 0.03),
+        ncol=min(3, max(1, len(legend_handles))),
+        frameon=False,
+        fontsize=10,
+    )
+    plt.tight_layout(rect=(0.0, 0.06, 1.0, 1.0))
 
 
 def _clean_plot_points(sigma, load_n, force_n, svi_params, trim_fraction: float = 1.0 / 3.0):
@@ -294,6 +351,7 @@ def plot_tire_curves(vehicle_states: STMStates, vehicle_forces: STMForces,
         plot_targets.extend((state_key, param_key, title, 'x') for state_key, param_key, title, _ in LONGITUDINAL_TARGETS)
     plot_targets += [(state_key, param_key, title, 'y') for state_key, param_key, title, _ in LATERAL_TARGETS]
     fig, ax = _make_subplot_grid(len(plot_targets), column_width=10.0)
+    lateral_axes = []
     for plot_pos, (state_key, param_key, title, direction) in enumerate(plot_targets):
         if fit_data and param_key in fit_data:
             sigma = jnp.asarray(fit_data[param_key]['sigma'])
@@ -331,6 +389,15 @@ def plot_tire_curves(vehicle_states: STMStates, vehicle_forces: STMForces,
         ax[plot_pos].set_ylabel('Tire Force / Tire Load')
         ax[plot_pos].set_xlabel('Slip Ratio' if direction == 'x' else 'Slip Angle in rad')
         ax[plot_pos].grid(True, alpha=0.3)
+        if direction == 'y':
+            lateral_axes.append(ax[plot_pos])
+    lateral_xlim = _combine_limits([axis.get_xlim() for axis in lateral_axes])
+    lateral_ylim = _combine_limits([axis.get_ylim() for axis in lateral_axes])
+    for lateral_axis in lateral_axes:
+        if lateral_xlim is not None:
+            lateral_axis.set_xlim(*lateral_xlim)
+        if lateral_ylim is not None:
+            lateral_axis.set_ylim(*lateral_ylim)
     fig.legend(['SVI', 'Nelder-Mead'], loc='upper center',
                bbox_to_anchor=(0.5, 0.04), ncol=2, fontsize=10, frameon=False)
     plt.tight_layout()
@@ -366,6 +433,8 @@ def plot_lateral_load_colored_curves(vehicle_states: STMStates, vehicle_forces: 
 
     load_sets = [load_n for _, _, load_n, _ in lateral_series if load_n.size]
     all_loads = np.concatenate(load_sets) if load_sets else np.array([], dtype=float)
+    sigma_limits = _combine_limits(_padded_limits(sigma) for _, sigma, _, _ in lateral_series)
+    mu_limits = _combine_limits(_padded_limits(mu_y) for _, _, _, mu_y in lateral_series)
     color_norm = None
     if all_loads.size:
         color_norm = plt.Normalize(float(np.min(all_loads)), float(np.max(all_loads)))
@@ -392,6 +461,10 @@ def plot_lateral_load_colored_curves(vehicle_states: STMStates, vehicle_forces: 
         ax.axvline(0.0, color='#333333', linestyle='--', linewidth=0.8, alpha=0.65)
         ax.set_title(title)
         ax.set_xlabel('Slip Angle [rad]')
+        if sigma_limits is not None:
+            ax.set_xlim(*sigma_limits)
+        if mu_limits is not None:
+            ax.set_ylim(*mu_limits)
         ax.grid(True, alpha=0.3)
 
     axes[0].set_ylabel('Lateral Friction Coefficient mu_y = Fy / Fz [-]')

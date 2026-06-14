@@ -62,3 +62,5 @@ class VhlParams:
     cl_rear: float
     roh_air_kgpm3: float
     a_vehicle_m2: float
+    ### Data Acquisition ###
+    sampling_freq_hz: float = 0.0
