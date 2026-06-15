@@ -157,6 +157,39 @@ def calc_total_lateral_force_body_n_from_pacejka(sensordata: FilteredData, vhl_s
     return force_y_front_body_n + force_y_rear_tire_n
 
 
+def calc_total_lateral_force_body_n_from_four_wheel_pacejka(
+        sensordata: FilteredData, vhl_states, vhl_forces,
+        tire_params_set: STMTireParams) -> jnp.array:
+    """Estimate body-frame lateral force from per-wheel slip angles, Fz, and fitted axle tire models."""
+    delta_f_rad = sensordata.gen_data.delta_f_rad
+    force_y_fl_tire_n = tire_model(
+        "MFSimple",
+        vhl_states.wheel_fl.sigma_y,
+        vhl_forces.wheel_fl.force_z_n,
+        tire_params_set.front_axle_y,
+    )
+    force_y_fr_tire_n = tire_model(
+        "MFSimple",
+        vhl_states.wheel_fr.sigma_y,
+        vhl_forces.wheel_fr.force_z_n,
+        tire_params_set.front_axle_y,
+    )
+    force_y_rl_tire_n = tire_model(
+        "MFSimple",
+        vhl_states.wheel_rl.sigma_y,
+        vhl_forces.wheel_rl.force_z_n,
+        tire_params_set.rear_axle_y,
+    )
+    force_y_rr_tire_n = tire_model(
+        "MFSimple",
+        vhl_states.wheel_rr.sigma_y,
+        vhl_forces.wheel_rr.force_z_n,
+        tire_params_set.rear_axle_y,
+    )
+    force_y_front_body_n = jnp.cos(delta_f_rad) * (force_y_fl_tire_n + force_y_fr_tire_n)
+    return force_y_front_body_n + force_y_rl_tire_n + force_y_rr_tire_n
+
+
 def calc_total_longitudinal_force_body_n_from_wheel_forces(sensordata: FilteredData, vhl_forces) -> jnp.array:
     """Sum wheel longitudinal forces in the body x-direction using front steering angle."""
     delta_f_rad = sensordata.gen_data.delta_f_rad
@@ -428,7 +461,8 @@ def keep_only_fresh_measurement_rows(filtered: FilteredData) -> tuple[FilteredDa
 
 
 def plot_lateral_estimation(sensordata: FilteredData, vhl_states, vhl_forces, vhl_params,
-                            tire_params_set: STMTireParams) -> None:
+                            tire_params_set: STMTireParams,
+                            include_four_wheel_prediction: bool = False) -> None:
     """Visualize measured vs Pacejka-estimated total lateral force."""
     time_s = sensordata.gen_data.time
     measured_total_lateral_force_n = vhl_params.mass_kg * sensordata.imu_data.acc_cog_y_mps2
@@ -439,6 +473,16 @@ def plot_lateral_estimation(sensordata: FilteredData, vhl_states, vhl_forces, vh
     fig, ax = plt.subplots(1, 1, figsize=(12, 4), constrained_layout=True)
     ax.plot(time_s, measured_total_lateral_force_n, label="Measured m * ay", color="#0065BD")
     ax.plot(time_s, estimated_total_lateral_force_n, label="Pacejka-estimated total Fy", color="#E37222")
+    if include_four_wheel_prediction:
+        estimated_four_wheel_lateral_force_n = calc_total_lateral_force_body_n_from_four_wheel_pacejka(
+            sensordata, vhl_states, vhl_forces, tire_params_set
+        )
+        ax.plot(
+            time_s,
+            estimated_four_wheel_lateral_force_n,
+            label="Four-wheel Pacejka total Fy",
+            color="#A2AD00",
+        )
     ax.set_title("Measured vs Pacejka-estimated Total Lateral Force")
     ax.set_xlabel("Time [s]")
     ax.set_ylabel("Force [N]")
