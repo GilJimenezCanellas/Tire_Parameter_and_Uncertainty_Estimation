@@ -17,8 +17,8 @@ LONGITUDINAL_TARGETS = [
 ]
 
 LATERAL_TARGETS = [
-    ('front_axle', 'front_axle_y', 'Front Lateral', '#0065BD'),
-    ('rear_axle', 'rear_axle_y', 'Rear Lateral', '#64A0C8'),
+    ('front_axle', 'front_axle_y', 'Front Lateral', '#0072B2'),
+    ('rear_axle', 'rear_axle_y', 'Rear Lateral', '#D55E00'),
 ]
 
 
@@ -342,7 +342,7 @@ def _build_load_regions(load_n, num_regions: int):
 
 
 def plot_tire_curves(vehicle_states: STMStates, vehicle_forces: STMForces,
-                     tire_params_set_svi: STMTireParams, tire_params_set_nelder: STMTireParams,
+                     tire_params_set_svi: STMTireParams, tire_params_set_nelder: STMTireParams | None = None,
                      clean_plots: bool = False, fit_data: dict | None = None,
                      include_longitudinal: bool = True):
     ''' Plot the resulting tire curves '''
@@ -379,11 +379,12 @@ def plot_tire_curves(vehicle_states: STMStates, vehicle_forces: STMForces,
             tire_model('MFSimple', slip_plot, load_ref, getattr(tire_params_set_svi, param_key)) / load_ref,
             color='#0065BD',
         )
-        ax[plot_pos].plot(
-            slip_plot,
-            tire_model('MFSimple', slip_plot, load_ref, getattr(tire_params_set_nelder, param_key)) / load_ref,
-            color='#E37222',
-        )
+        if tire_params_set_nelder is not None:
+            ax[plot_pos].plot(
+                slip_plot,
+                tire_model('MFSimple', slip_plot, load_ref, getattr(tire_params_set_nelder, param_key)) / load_ref,
+                color='#E37222',
+            )
         ax[plot_pos].scatter(sigma, force_n / load_n, alpha=1.0, s=0.5, color='#DAD7CB')
         ax[plot_pos].set_title(title)
         ax[plot_pos].set_ylabel('Tire Force / Tire Load')
@@ -398,8 +399,6 @@ def plot_tire_curves(vehicle_states: STMStates, vehicle_forces: STMForces,
             lateral_axis.set_xlim(*lateral_xlim)
         if lateral_ylim is not None:
             lateral_axis.set_ylim(*lateral_ylim)
-    fig.legend(['SVI', 'Nelder-Mead'], loc='upper center',
-               bbox_to_anchor=(0.5, 0.04), ncol=2, fontsize=10, frameon=False)
     plt.tight_layout()
 
 

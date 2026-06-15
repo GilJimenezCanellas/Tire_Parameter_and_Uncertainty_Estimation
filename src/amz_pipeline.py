@@ -1195,9 +1195,12 @@ def fit_tire_parameters(conf, sensordata, vhl_params=None):
 
     tire_params_set_svi = STMTireParams()
     std_params_set_svi = STMTireParams()
-    tire_params_set_nelder = STMTireParams()
+    use_nelder = bool(getattr(conf, "use_nelder", False))
+    tire_params_set_nelder = STMTireParams() if use_nelder else None
     fit_excitation_samples = {}
-    target_sample_points = max(conf.svi_options["sample_points"], conf.nelder_options["sample_points"])
+    target_sample_points = int(conf.svi_options["sample_points"])
+    if use_nelder:
+        target_sample_points = max(target_sample_points, int(conf.nelder_options["sample_points"]))
     if not fit_longitudinal:
         longitudinal_force_mode = getattr(conf, "longitudinal_force_mode", "wheel_dynamics")
         if longitudinal_force_mode == "zero":
@@ -1284,9 +1287,7 @@ def fit_tire_parameters(conf, sensordata, vhl_params=None):
         )
         print(f"Fitting - {state_key} {direction}")
         svi_options = dict(conf.svi_options)
-        nelder_options = dict(conf.nelder_options)
         svi_options["sample_points"] = len(sigma)
-        nelder_options["sample_points"] = len(sigma)
         params_svi, std_svi, _ = tire_param_fitting(
             "SVI",
             "MFSimple",
@@ -1299,27 +1300,30 @@ def fit_tire_parameters(conf, sensordata, vhl_params=None):
             svi_options,
             fit_flags,
         )
-        params_nelder, _, _ = tire_param_fitting(
-            "Nelder",
-            "MFSimple",
-            sigma,
-            force_n,
-            load_n,
-            target_params_init,
-            params_min,
-            params_max,
-            nelder_options,
-            fit_flags,
-        )
         print("SVI:")
         print(params_svi)
         print(std_svi)
-        print("Nelder:")
-        print(params_nelder)
 
         setattr(tire_params_set_svi, param_key, params_svi)
         setattr(std_params_set_svi, param_key, std_svi)
-        setattr(tire_params_set_nelder, param_key, params_nelder)
+        if use_nelder:
+            nelder_options = dict(conf.nelder_options)
+            nelder_options["sample_points"] = len(sigma)
+            params_nelder, _, _ = tire_param_fitting(
+                "Nelder",
+                "MFSimple",
+                sigma,
+                force_n,
+                load_n,
+                target_params_init,
+                params_min,
+                params_max,
+                nelder_options,
+                fit_flags,
+            )
+            print("Nelder:")
+            print(params_nelder)
+            setattr(tire_params_set_nelder, param_key, params_nelder)
 
     return (
         vhl_params,
