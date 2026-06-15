@@ -460,6 +460,207 @@ def keep_only_fresh_measurement_rows(filtered: FilteredData) -> tuple[FilteredDa
     return filtered, dropped_counts
 
 
+
+def _select_open_loop_start_indices(time_s: np.ndarray, vel_x_mps: np.ndarray, horizon_s: float,
+                                    start_count: int, min_velocity_mps: float) -> np.ndarray:
+    """Choose evenly spaced valid rollout starts with enough future data."""
+    if start_count <= 0:
+        raise ValueError("Open-loop start count must be positive.")
+    if horizon_s <= 0.0:
+        raise ValueError("Open-loop horizon must be positive.")
+    valid_start_mask = (vel_x_mps >= min_velocity_mps) & (time_s <= time_s[-1] - horizon_s)
+    valid_indices = np.flatnonzero(valid_start_mask)
+    if valid_indices.size == 0:
+        raise ValueError(
+            "No valid open-loop start points found. Need samples above "
+            f"{min_velocity_mps:.3g} m/s with at least {horizon_s:.3g} s of future data."
+        )
+    if valid_indices.size <= start_count:
+        return valid_indices
+    selected_positions = np.linspace(0, valid_indices.size - 1, start_count, dtype=int)
+    return valid_indices[selected_positions]
+
+
+def _four_wheel_lateral_forces_tire_frame(vx_mps: float, vy_mps: float, yaw_rate_radps: float,
+                                          delta_rad: float, tire_loads_n: tuple[float, float, float, float],
+                                          tire_params_set: STMTireParams, vhl_params) -> tuple[float, float, float, float]:
+    """Calculate per-wheel tire-frame lateral forces from predicted state and wheel loads."""
+    load_fl_n, load_fr_n, load_rl_n, load_rr_n = tire_loads_n
+    vel_y_front_mps = vy_mps + yaw_rate_radps * vhl_params.l_front_m
+    vel_y_rear_mps = vy_mps - yaw_rate_radps * vhl_params.l_rear_m
+    vel_x_fl_mps = vx_mps - yaw_rate_radps * vhl_params.tw_front_m / 2.0
+    vel_x_fr_mps = vx_mps + yaw_rate_radps * vhl_params.tw_front_m / 2.0
+    vel_x_rl_mps = vx_mps - yaw_rate_radps * vhl_params.tw_rear_m / 2.0
+    vel_x_rr_mps = vx_mps + yaw_rate_radps * vhl_params.tw_rear_m / 2.0
+
+    cos_delta = np.cos(delta_rad)
+    sin_delta = np.sin(delta_rad)
+    vel_x_fl_tire_mps = cos_delta * vel_x_fl_mps + sin_delta * vel_y_front_mps
+    vel_y_fl_tire_mps = -sin_delta * vel_x_fl_mps + cos_delta * vel_y_front_mps
+    vel_x_fr_tire_mps = cos_delta * vel_x_fr_mps + sin_delta * vel_y_front_mps
+    vel_y_fr_tire_mps = -sin_delta * vel_x_fr_mps + cos_delta * vel_y_front_mps
+
+    sigma_fl = -np.arctan(vel_y_fl_tire_mps / max(vel_x_fl_tire_mps, 2.0))
+    sigma_fr = -np.arctan(vel_y_fr_tire_mps / max(vel_x_fr_tire_mps, 2.0))
+    sigma_rl = -np.arctan(vel_y_rear_mps / max(vel_x_rl_mps, 2.0))
+    sigma_rr = -np.arctan(vel_y_rear_mps / max(vel_x_rr_mps, 2.0))
+
+    force_y_fl_n = float(tire_model("MFSimple", sigma_fl, load_fl_n, tire_params_set.front_axle_y))
+    force_y_fr_n = float(tire_model("MFSimple", sigma_fr, load_fr_n, tire_params_set.front_axle_y))
+    force_y_rl_n = float(tire_model("MFSimple", sigma_rl, load_rl_n, tire_params_set.rear_axle_y))
+    force_y_rr_n = float(tire_model("MFSimple", sigma_rr, load_rr_n, tire_params_set.rear_axle_y))
+    return force_y_fl_n, force_y_fr_n, force_y_rl_n, force_y_rr_n
+
+
+def _four_wheel_model_derivative(state: np.ndarray, delta_rad: float,
+                                 wheel_fx_n: tuple[float, float, float, float], acc_z_mps2: float,
+                                 vhl_params, tire_params_set: STMTireParams) -> np.ndarray:
+    """Return [vx_dot, vy_dot, yaw_rate_dot] for the four-wheel open-loop validation model."""
+    vx_mps, vy_mps, yaw_rate_radps = state
+    force_x_fl_n, force_x_fr_n, force_x_rl_n, force_x_rr_n = wheel_fx_n
+    cos_delta = np.cos(delta_rad)
+    sin_delta = np.sin(delta_rad)
+    wheelbase_m = vhl_params.l_front_m + vhl_params.l_rear_m
+
+    force_drag_n = 0.5 * vhl_params.roh_air_kgpm3 * vhl_params.a_vehicle_m2 * vhl_params.cw * vx_mps**2
+    force_x_front_body_for_load_n = cos_delta * (force_x_fl_n + force_x_fr_n)
+    force_x_rear_body_n = force_x_rl_n + force_x_rr_n
+    acc_x_for_load_mps2 = (force_x_front_body_for_load_n + force_x_rear_body_n - force_drag_n) / vhl_params.mass_kg
+
+    load_cog_n = vhl_params.mass_kg * acc_z_mps2
+    load_aero_front_n = -0.5 * vhl_params.roh_air_kgpm3 * vhl_params.a_vehicle_m2 * vhl_params.cl_front * vx_mps**2
+    load_aero_rear_n = -0.5 * vhl_params.roh_air_kgpm3 * vhl_params.a_vehicle_m2 * vhl_params.cl_rear * vx_mps**2
+    load_transfer_pitch_n = vhl_params.mass_kg * vhl_params.cog_z_m * acc_x_for_load_mps2 / wheelbase_m
+    load_front_n = load_cog_n * vhl_params.l_rear_m / wheelbase_m + load_aero_front_n - load_transfer_pitch_n
+    load_rear_n = load_cog_n * vhl_params.l_front_m / wheelbase_m + load_aero_rear_n + load_transfer_pitch_n
+
+    tire_loads_n = (
+        max(load_front_n / 2.0, 1.0),
+        max(load_front_n / 2.0, 1.0),
+        max(load_rear_n / 2.0, 1.0),
+        max(load_rear_n / 2.0, 1.0),
+    )
+    force_y_fl_n = force_y_fr_n = force_y_rl_n = force_y_rr_n = 0.0
+    for _ in range(3):
+        force_y_fl_n, force_y_fr_n, force_y_rl_n, force_y_rr_n = _four_wheel_lateral_forces_tire_frame(
+            vx_mps, vy_mps, yaw_rate_radps, delta_rad, tire_loads_n, tire_params_set, vhl_params
+        )
+        force_y_front_body_n = sin_delta * (force_x_fl_n + force_x_fr_n) + cos_delta * (force_y_fl_n + force_y_fr_n)
+        force_y_rear_body_n = force_y_rl_n + force_y_rr_n
+        front_load_transfer_n = force_y_front_body_n * vhl_params.cog_z_m / vhl_params.tw_front_m
+        rear_load_transfer_n = force_y_rear_body_n * vhl_params.cog_z_m / vhl_params.tw_rear_m
+        tire_loads_n = (
+            max(load_front_n / 2.0 - front_load_transfer_n, 1.0),
+            max(load_front_n / 2.0 + front_load_transfer_n, 1.0),
+            max(load_rear_n / 2.0 - rear_load_transfer_n, 1.0),
+            max(load_rear_n / 2.0 + rear_load_transfer_n, 1.0),
+        )
+
+    force_x_fl_body_n = cos_delta * force_x_fl_n - sin_delta * force_y_fl_n
+    force_x_fr_body_n = cos_delta * force_x_fr_n - sin_delta * force_y_fr_n
+    force_y_fl_body_n = sin_delta * force_x_fl_n + cos_delta * force_y_fl_n
+    force_y_fr_body_n = sin_delta * force_x_fr_n + cos_delta * force_y_fr_n
+    force_x_rl_body_n = force_x_rl_n
+    force_x_rr_body_n = force_x_rr_n
+    force_y_rl_body_n = force_y_rl_n
+    force_y_rr_body_n = force_y_rr_n
+
+    force_x_total_n = (
+        force_x_fl_body_n + force_x_fr_body_n + force_x_rl_body_n + force_x_rr_body_n - force_drag_n
+    )
+    force_y_total_n = force_y_fl_body_n + force_y_fr_body_n + force_y_rl_body_n + force_y_rr_body_n
+    yaw_moment_nm = (
+        vhl_params.l_front_m * (force_y_fl_body_n + force_y_fr_body_n)
+        - vhl_params.l_rear_m * (force_y_rl_body_n + force_y_rr_body_n)
+        - (vhl_params.tw_front_m / 2.0) * force_x_fl_body_n
+        + (vhl_params.tw_front_m / 2.0) * force_x_fr_body_n
+        - (vhl_params.tw_rear_m / 2.0) * force_x_rl_body_n
+        + (vhl_params.tw_rear_m / 2.0) * force_x_rr_body_n
+    )
+
+    vx_dot_mps2 = force_x_total_n / vhl_params.mass_kg + yaw_rate_radps * vy_mps
+    vy_dot_mps2 = force_y_total_n / vhl_params.mass_kg - yaw_rate_radps * vx_mps
+    yaw_rate_dot_radps2 = yaw_moment_nm / vhl_params.izz_kgm2
+    return np.array([vx_dot_mps2, vy_dot_mps2, yaw_rate_dot_radps2], dtype=float)
+
+
+def plot_four_wheel_open_loop_validation(sensordata: FilteredData, vhl_forces, vhl_params,
+                                         tire_params_set: STMTireParams, horizon_s: float = 1.0,
+                                         start_count: int = 10, min_velocity_mps: float = 5.0) -> None:
+    """Propagate the four-wheel model from several measured states and compare vx, vy, and yaw rate."""
+    time_s = np.asarray(sensordata.gen_data.time, dtype=float)
+    vel_x_mps = np.asarray(sensordata.cor_data.vel_cog_x_mps, dtype=float)
+    vel_y_mps = np.asarray(sensordata.cor_data.vel_cog_y_mps, dtype=float)
+    yaw_rate_radps = np.asarray(sensordata.imu_data.yaw_rate_radps, dtype=float)
+    delta_f_rad = np.asarray(sensordata.gen_data.delta_f_rad, dtype=float)
+    acc_z_mps2 = np.asarray(sensordata.imu_data.acc_cog_z_mps2, dtype=float)
+    force_x_fl_n = np.asarray(vhl_forces.wheel_fl.force_x_n, dtype=float)
+    force_x_fr_n = np.asarray(vhl_forces.wheel_fr.force_x_n, dtype=float)
+    force_x_rl_n = np.asarray(vhl_forces.wheel_rl.force_x_n, dtype=float)
+    force_x_rr_n = np.asarray(vhl_forces.wheel_rr.force_x_n, dtype=float)
+
+    start_indices = _select_open_loop_start_indices(time_s, vel_x_mps, horizon_s, start_count, min_velocity_mps)
+    fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True, constrained_layout=True)
+    state_specs = [
+        (0, vel_x_mps, "Longitudinal velocity vx [m/s]"),
+        (1, vel_y_mps, "Lateral velocity vy [m/s]"),
+        (2, yaw_rate_radps, "Yaw rate [rad/s]"),
+    ]
+    colors = plt.cm.tab10(np.linspace(0.0, 1.0, max(len(start_indices), 1)))
+
+    for rollout_idx, start_idx in enumerate(start_indices):
+        end_idx = int(np.searchsorted(time_s, time_s[start_idx] + horizon_s, side="right"))
+        if end_idx <= start_idx + 1:
+            continue
+        predicted_states = np.zeros((end_idx - start_idx, 3), dtype=float)
+        predicted_states[0] = [vel_x_mps[start_idx], vel_y_mps[start_idx], yaw_rate_radps[start_idx]]
+        for local_idx, sample_idx in enumerate(range(start_idx, end_idx - 1), start=1):
+            dt_s = float(time_s[sample_idx + 1] - time_s[sample_idx])
+            wheel_fx_n = (
+                force_x_fl_n[sample_idx],
+                force_x_fr_n[sample_idx],
+                force_x_rl_n[sample_idx],
+                force_x_rr_n[sample_idx],
+            )
+            state_dot = _four_wheel_model_derivative(
+                predicted_states[local_idx - 1],
+                delta_f_rad[sample_idx],
+                wheel_fx_n,
+                acc_z_mps2[sample_idx],
+                vhl_params,
+                tire_params_set,
+            )
+            predicted_states[local_idx] = predicted_states[local_idx - 1] + dt_s * state_dot
+
+        relative_time_s = time_s[start_idx:end_idx] - time_s[start_idx]
+        color = colors[rollout_idx]
+        for axis_idx, measured, ylabel in state_specs:
+            axes[axis_idx].plot(
+                relative_time_s,
+                measured[start_idx:end_idx],
+                color=color,
+                alpha=0.35,
+                linewidth=1.0,
+                label="Measured" if rollout_idx == 0 else None,
+            )
+            axes[axis_idx].plot(
+                relative_time_s,
+                predicted_states[:, axis_idx],
+                color=color,
+                linestyle="--",
+                linewidth=1.4,
+                label="Open-loop four-wheel" if rollout_idx == 0 else None,
+            )
+            axes[axis_idx].set_ylabel(ylabel)
+            axes[axis_idx].grid(True, alpha=0.3)
+
+    axes[0].set_title(
+        f"Four-wheel Open-loop State Validation ({len(start_indices)} starts, {horizon_s:.2f} s horizon)"
+    )
+    axes[-1].set_xlabel("Time from rollout start [s]")
+    axes[0].legend(loc="best")
+
+
 def plot_lateral_estimation(sensordata: FilteredData, vhl_states, vhl_forces, vhl_params,
                             tire_params_set: STMTireParams,
                             include_four_wheel_prediction: bool = False) -> None:

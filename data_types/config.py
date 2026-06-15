@@ -56,6 +56,9 @@ class Config():
     use_nelder: bool = False
     plot_fit_excitation: bool = False
     plot_four_wheel_lateral: bool = False
+    plot_four_wheel_open_loop: bool = False
+    open_loop_horizon_s: float = 1.0
+    open_loop_start_count: int = 10
     fit_longitudinal: bool = False
     longitudinal_force_mode: str = "wheel_dynamics"
     params_init_wheel_fl_x: dict | None = None
