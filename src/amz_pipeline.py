@@ -606,7 +606,19 @@ def plot_four_wheel_open_loop_validation(sensordata: FilteredData, vhl_forces, v
         (1, vel_y_mps, "Lateral velocity vy [m/s]"),
         (2, yaw_rate_radps, "Yaw rate [rad/s]"),
     ]
-    colors = plt.cm.tab10(np.linspace(0.0, 1.0, max(len(start_indices), 1)))
+    measured_color = "#0065BD"
+    prediction_color = "#CC0000"
+
+    for axis_idx, measured, ylabel in state_specs:
+        axes[axis_idx].plot(
+            time_s,
+            measured,
+            color=measured_color,
+            linewidth=1.0,
+            label="Measured",
+        )
+        axes[axis_idx].set_ylabel(ylabel)
+        axes[axis_idx].grid(True, alpha=0.3)
 
     for rollout_idx, start_idx in enumerate(start_indices):
         end_idx = int(np.searchsorted(time_s, time_s[start_idx] + horizon_s, side="right"))
@@ -632,32 +644,20 @@ def plot_four_wheel_open_loop_validation(sensordata: FilteredData, vhl_forces, v
             )
             predicted_states[local_idx] = predicted_states[local_idx - 1] + dt_s * state_dot
 
-        relative_time_s = time_s[start_idx:end_idx] - time_s[start_idx]
-        color = colors[rollout_idx]
-        for axis_idx, measured, ylabel in state_specs:
+        rollout_time_s = time_s[start_idx:end_idx]
+        for axis_idx, _, _ in state_specs:
             axes[axis_idx].plot(
-                relative_time_s,
-                measured[start_idx:end_idx],
-                color=color,
-                alpha=0.35,
-                linewidth=1.0,
-                label="Measured" if rollout_idx == 0 else None,
-            )
-            axes[axis_idx].plot(
-                relative_time_s,
+                rollout_time_s,
                 predicted_states[:, axis_idx],
-                color=color,
-                linestyle="--",
+                color=prediction_color,
                 linewidth=1.4,
                 label="Open-loop four-wheel" if rollout_idx == 0 else None,
             )
-            axes[axis_idx].set_ylabel(ylabel)
-            axes[axis_idx].grid(True, alpha=0.3)
 
     axes[0].set_title(
         f"Four-wheel Open-loop State Validation ({len(start_indices)} starts, {horizon_s:.2f} s horizon)"
     )
-    axes[-1].set_xlabel("Time from rollout start [s]")
+    axes[-1].set_xlabel("Run time [s]")
     axes[0].legend(loc="best")
 
 
