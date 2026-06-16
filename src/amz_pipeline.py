@@ -584,20 +584,60 @@ def _four_wheel_model_derivative(state: np.ndarray, delta_rad: float,
     return np.array([vx_dot_mps2, vy_dot_mps2, yaw_rate_dot_radps2], dtype=float)
 
 
+def calc_mpc_ideal_wheel_forces_from_torque(sensordata: FilteredData, vhl_params) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return MPC-style ideal wheel forces: wheel Fx = motor torque * gear ratio / tire radius."""
+    safe_front_radius_m = max(abs(float(vhl_params.r_tire_unloaded_front_m)), 1.0e-6)
+    safe_rear_radius_m = max(abs(float(vhl_params.r_tire_unloaded_rear_m)), 1.0e-6)
+    gear_ratio = float(vhl_params.gear_ratio)
+    return (
+        np.asarray(sensordata.gen_data.t_m_fl_nm, dtype=float) * gear_ratio / safe_front_radius_m,
+        np.asarray(sensordata.gen_data.t_m_fr_nm, dtype=float) * gear_ratio / safe_front_radius_m,
+        np.asarray(sensordata.gen_data.t_m_rl_nm, dtype=float) * gear_ratio / safe_rear_radius_m,
+        np.asarray(sensordata.gen_data.t_m_rr_nm, dtype=float) * gear_ratio / safe_rear_radius_m,
+    )
+
+
+def _roll_out_four_wheel_model(time_s: np.ndarray, start_idx: int, end_idx: int,
+                               initial_state: tuple[float, float, float], delta_f_rad: np.ndarray,
+                               acc_z_mps2: np.ndarray,
+                               wheel_forces_by_corner: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+                               vhl_params, tire_params_set: STMTireParams) -> np.ndarray:
+    """Integrate the four-wheel validation model over one measured input window."""
+    predicted_states = np.zeros((end_idx - start_idx, 3), dtype=float)
+    predicted_states[0] = initial_state
+    for local_idx, sample_idx in enumerate(range(start_idx, end_idx - 1), start=1):
+        dt_s = float(time_s[sample_idx + 1] - time_s[sample_idx])
+        wheel_fx_n = tuple(float(force[sample_idx]) for force in wheel_forces_by_corner)
+        state_dot = _four_wheel_model_derivative(
+            predicted_states[local_idx - 1],
+            delta_f_rad[sample_idx],
+            wheel_fx_n,
+            acc_z_mps2[sample_idx],
+            vhl_params,
+            tire_params_set,
+        )
+        predicted_states[local_idx] = predicted_states[local_idx - 1] + dt_s * state_dot
+    return predicted_states
+
+
 def plot_four_wheel_open_loop_validation(sensordata: FilteredData, vhl_forces, vhl_params,
                                          tire_params_set: STMTireParams, horizon_s: float = 1.0,
-                                         start_count: int = 10, min_velocity_mps: float = 5.0) -> None:
-    """Propagate the four-wheel model from several measured states and compare vx, vy, and yaw rate."""
+                                         start_count: int = 10, min_velocity_mps: float = 5.0,
+                                         compare_mpc_model: bool = False) -> None:
+    """Propagate four-wheel model variants from measured states and compare vx, vy, and yaw rate."""
     time_s = np.asarray(sensordata.gen_data.time, dtype=float)
     vel_x_mps = np.asarray(sensordata.cor_data.vel_cog_x_mps, dtype=float)
     vel_y_mps = np.asarray(sensordata.cor_data.vel_cog_y_mps, dtype=float)
     yaw_rate_radps = np.asarray(sensordata.imu_data.yaw_rate_radps, dtype=float)
     delta_f_rad = np.asarray(sensordata.gen_data.delta_f_rad, dtype=float)
     acc_z_mps2 = np.asarray(sensordata.imu_data.acc_cog_z_mps2, dtype=float)
-    force_x_fl_n = np.asarray(vhl_forces.wheel_fl.force_x_n, dtype=float)
-    force_x_fr_n = np.asarray(vhl_forces.wheel_fr.force_x_n, dtype=float)
-    force_x_rl_n = np.asarray(vhl_forces.wheel_rl.force_x_n, dtype=float)
-    force_x_rr_n = np.asarray(vhl_forces.wheel_rr.force_x_n, dtype=float)
+    force_model_wheel_forces = (
+        np.asarray(vhl_forces.wheel_fl.force_x_n, dtype=float),
+        np.asarray(vhl_forces.wheel_fr.force_x_n, dtype=float),
+        np.asarray(vhl_forces.wheel_rl.force_x_n, dtype=float),
+        np.asarray(vhl_forces.wheel_rr.force_x_n, dtype=float),
+    )
+    mpc_wheel_forces = calc_mpc_ideal_wheel_forces_from_torque(sensordata, vhl_params)
 
     start_indices = _select_open_loop_start_indices(time_s, vel_x_mps, horizon_s, start_count, min_velocity_mps)
     fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True, constrained_layout=True)
@@ -607,7 +647,8 @@ def plot_four_wheel_open_loop_validation(sensordata: FilteredData, vhl_forces, v
         (2, yaw_rate_radps, "Yaw rate [rad/s]"),
     ]
     measured_color = "#0065BD"
-    prediction_color = "#CC0000"
+    force_model_color = "#CC0000"
+    mpc_model_color = "#A2AD00"
 
     for axis_idx, measured, ylabel in state_specs:
         axes[axis_idx].plot(
@@ -624,38 +665,54 @@ def plot_four_wheel_open_loop_validation(sensordata: FilteredData, vhl_forces, v
         end_idx = int(np.searchsorted(time_s, time_s[start_idx] + horizon_s, side="right"))
         if end_idx <= start_idx + 1:
             continue
-        predicted_states = np.zeros((end_idx - start_idx, 3), dtype=float)
-        predicted_states[0] = [vel_x_mps[start_idx], vel_y_mps[start_idx], yaw_rate_radps[start_idx]]
-        for local_idx, sample_idx in enumerate(range(start_idx, end_idx - 1), start=1):
-            dt_s = float(time_s[sample_idx + 1] - time_s[sample_idx])
-            wheel_fx_n = (
-                force_x_fl_n[sample_idx],
-                force_x_fr_n[sample_idx],
-                force_x_rl_n[sample_idx],
-                force_x_rr_n[sample_idx],
-            )
-            state_dot = _four_wheel_model_derivative(
-                predicted_states[local_idx - 1],
-                delta_f_rad[sample_idx],
-                wheel_fx_n,
-                acc_z_mps2[sample_idx],
+        rollout_time_s = time_s[start_idx:end_idx]
+        initial_state = (vel_x_mps[start_idx], vel_y_mps[start_idx], yaw_rate_radps[start_idx])
+        force_model_states = _roll_out_four_wheel_model(
+            time_s,
+            start_idx,
+            end_idx,
+            initial_state,
+            delta_f_rad,
+            acc_z_mps2,
+            force_model_wheel_forces,
+            vhl_params,
+            tire_params_set,
+        )
+        mpc_model_states = None
+        if compare_mpc_model:
+            mpc_model_states = _roll_out_four_wheel_model(
+                time_s,
+                start_idx,
+                end_idx,
+                initial_state,
+                delta_f_rad,
+                acc_z_mps2,
+                mpc_wheel_forces,
                 vhl_params,
                 tire_params_set,
             )
-            predicted_states[local_idx] = predicted_states[local_idx - 1] + dt_s * state_dot
-
-        rollout_time_s = time_s[start_idx:end_idx]
         for axis_idx, _, _ in state_specs:
             axes[axis_idx].plot(
                 rollout_time_s,
-                predicted_states[:, axis_idx],
-                color=prediction_color,
+                force_model_states[:, axis_idx],
+                color=force_model_color,
                 linewidth=1.4,
-                label="Open-loop four-wheel" if rollout_idx == 0 else None,
+                label="Open-loop force-model Fx" if rollout_idx == 0 else None,
             )
+            if mpc_model_states is not None:
+                axes[axis_idx].plot(
+                    rollout_time_s,
+                    mpc_model_states[:, axis_idx],
+                    color=mpc_model_color,
+                    linestyle="--",
+                    linewidth=1.4,
+                    label="Open-loop MPC ideal Fx" if rollout_idx == 0 else None,
+                )
 
+    comparison_label = " vs MPC ideal wheel Fx" if compare_mpc_model else ""
     axes[0].set_title(
-        f"Four-wheel Open-loop State Validation ({len(start_indices)} starts, {horizon_s:.2f} s horizon)"
+        f"Four-wheel Open-loop State Validation{comparison_label} "
+        f"({len(start_indices)} starts, {horizon_s:.2f} s horizon)"
     )
     axes[-1].set_xlabel("Run time [s]")
     axes[0].legend(loc="best")
